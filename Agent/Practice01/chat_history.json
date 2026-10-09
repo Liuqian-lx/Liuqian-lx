@@ -1,0 +1,18 @@
+[
+  {
+    "role": "user",
+    "content": "你好我叫LX"
+  },
+  {
+    "role": "assistant",
+    "content": "你好，LX！很高兴认识你。我是AI助手，有什么可以帮你的吗？"
+  },
+  {
+    "role": "user",
+    "content": "我叫什么名字"
+  },
+  {
+    "role": "assistant",
+    "content": "你叫 **LX**。这是你刚才告诉我的名字。"
+  }
+]
