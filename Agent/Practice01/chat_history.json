@@ -14,5 +14,37 @@
   {
     "role": "assistant",
     "content": "你叫 **LX**。这是你刚才告诉我的名字。"
+  },
+  {
+    "role": "user",
+    "content": "你好今天星期几"
+  },
+  {
+    "role": "assistant",
+    "content": "今天是 **2026年4月30日，星期四**。"
+  },
+  {
+    "role": "user",
+    "content": "你好你是谁"
+  },
+  {
+    "role": "assistant",
+    "content": "你好，LX！我是 **AI助手**，一个智能对话助手，可以帮你回答问题、写作、翻译、学习、查资料等。有什么需要我帮忙的吗？"
+  },
+  {
+    "role": "user",
+    "content": "你好我叫LY"
+  },
+  {
+    "role": "assistant",
+    "content": "你好，LY！很高兴认识你。之前你告诉我你叫 LX，现在改叫 LY，我记住了。有什么可以帮你的吗？"
+  },
+  {
+    "role": "user",
+    "content": "我之前叫什么"
+  },
+  {
+    "role": "assistant",
+    "content": "你之前告诉我你叫 **LX**。后来你说你叫 **LY**，所以我记住了你现在叫 **LY**。"
   }
 ]

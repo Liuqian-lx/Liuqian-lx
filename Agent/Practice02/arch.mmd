@@ -1,0 +1,130 @@
+flowchart TD
+    %% ==================== 命令行交互层 ====================
+    subgraph CLI["命令行交互层"]
+        U["用户<br/>键盘输入提示词"]
+        INPUT["input 读取 prompt<br/>messages.append role=user"]
+        OUT["终端流式打印回答<br/>print flush"]
+        SAVE["save_history<br/>写入 chat_history.json"]
+    end
+
+    %% ==================== 主程序 chat.py ====================
+    subgraph MAIN["主程序 chat.py"]
+        LOOP["main 对话主循环<br/>while True"]
+        CFG["load_config<br/>读取 config.ini"]
+        HIST["load_history<br/>恢复历史消息"]
+        CHAT["chat 核心函数<br/>流式请求与结果聚合"]
+        AGG["聚合 delta.content<br/>与 delta.tool_calls"]
+        DISPATCH["工具分发器<br/>按 function.name 路由"]
+        RESULT["工具结果封装<br/>success/result 或 success/error"]
+    end
+
+    %% ==================== 大模型服务 ====================
+    subgraph LLM["大模型服务 OpenAI 兼容接口"]
+        API["client.chat.completions.create<br/>stream=True"]
+        MSG["messages 上下文<br/>user / assistant / tool"]
+    end
+
+    %% ==================== 内置工具 ====================
+    subgraph BUILTIN["chat.py 内置工具"]
+        GETDATE["getDate<br/>获取系统日期时间"]
+        LEAP["isLeapYear<br/>判断指定年份是否闰年"]
+        ISLEAPFN["is_leap_year<br/>取模判定逻辑"]
+    end
+
+    %% ==================== 工具模块 ====================
+    subgraph TOOLMOD["工具模块 file_agent_tools.py"]
+        REG["TOOLS<br/>10 个工具的 JSON Schema"]
+        MAP["TOOL_MAP<br/>工具名 → 函数对象"]
+
+        subgraph READTOOLS["读取与查询工具"]
+            T1["get_current_directory"]
+            T2["list_directory"]
+            T3["get_file_type"]
+            T4["read_file_content"]
+        end
+
+        subgraph WRITETOOLS["创建与编辑工具"]
+            T5["create_file"]
+            T6["edit_file"]
+            T7["create_directory"]
+        end
+
+        subgraph DELTOOLS["删除与重命名工具"]
+            T8["remove_directory"]
+            T9["remove_file"]
+            T10["rename_path"]
+        end
+    end
+
+    %% ==================== 操作系统层 ====================
+    subgraph OS["操作系统层"]
+        OSPATH["标准库 os / os.path<br/>路径规范化 与 文件读写"]
+        SHUTIL["标准库 shutil<br/>rmtree 递归删除目录"]
+        SUBPROC["标准库 subprocess<br/>调用系统命令"]
+        CMD["Windows cmd<br/>date /t 、 time /t"]
+        FS["本地文件系统<br/>磁盘上的真实文件与目录"]
+    end
+
+    %% ---------- 交互与主循环 ----------
+    U --> INPUT
+    INPUT --> LOOP
+    LOOP --> CHAT
+    LOOP --> SAVE
+    HIST -->|启动时载入历史 messages| LOOP
+    CFG -->|base_url / model_name / api_key| CHAT
+
+    %% ---------- 主程序与模型 ----------
+    CHAT -->|messages + tools=TOOLS| API
+    API -->|流式 chunk| AGG
+    AGG --> OUT
+    AGG -->|无 tool_calls 直接作答| MSG
+    AGG -->|存在 tool_calls| DISPATCH
+    MSG -->|下一轮上下文| API
+
+    %% ---------- 工具注册与分发 ----------
+    REG -->|工具描述注入请求| CHAT
+    DISPATCH -->|name = getDate| GETDATE
+    DISPATCH -->|name = isLeapYear| LEAP
+    DISPATCH -->|name 命中 TOOL_MAP| MAP
+    LEAP --> ISLEAPFN
+    MAP --> T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10
+
+    %% ---------- 工具结果回填 ----------
+    T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 --> RESULT
+    GETDATE --> RESULT
+    LEAP --> RESULT
+    RESULT -->|role=tool + tool_call_id 回填| CHAT
+    CHAT -->|携带工具结果二次请求| API
+
+    %% ---------- 工具与操作系统 ----------
+    T1 & T2 & T3 & T4 & T5 & T6 & T7 & T9 & T10 --> OSPATH
+    T8 --> SHUTIL
+    OSPATH --> FS
+    SHUTIL --> FS
+    GETDATE --> SUBPROC
+    SUBPROC --> CMD
+
+    %% ==================== 样式 ====================
+    classDef io fill:#eef2f7,stroke:#5b6b7c,color:#1f2937
+    classDef main fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef llm fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef builtin fill:#ffe4e6,stroke:#e11d48,color:#881337
+    classDef tool fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef os fill:#f3e8ff,stroke:#9333ea,color:#4c1d95
+
+    class U,INPUT,OUT,SAVE io
+    class LOOP,CFG,HIST,CHAT,AGG,DISPATCH,RESULT main
+    class API,MSG llm
+    class GETDATE,LEAP,ISLEAPFN builtin
+    class REG,MAP,T1,T2,T3,T4,T5,T6,T7,T8,T9,T10 tool
+    class OSPATH,SHUTIL,SUBPROC,CMD,FS os
+
+    style CLI fill:#f8fafc,stroke:#94a3b8,stroke-dasharray:4 4
+    style MAIN fill:#eff6ff,stroke:#3b82f6,stroke-dasharray:4 4
+    style LLM fill:#fffbeb,stroke:#f59e0b,stroke-dasharray:4 4
+    style BUILTIN fill:#fff1f2,stroke:#fb7185,stroke-dasharray:4 4
+    style TOOLMOD fill:#f0fdf4,stroke:#22c55e,stroke-dasharray:4 4
+    style READTOOLS fill:#ecfdf5,stroke:#86efac
+    style WRITETOOLS fill:#ecfdf5,stroke:#86efac
+    style DELTOOLS fill:#ecfdf5,stroke:#86efac
+    style OS fill:#faf5ff,stroke:#a855f7,stroke-dasharray:4 4
