@@ -6,6 +6,7 @@
 from .config import ConfigError, LLMConfig, load_config
 from .llm_client import LLMClient, LLMError, LLMResponse, ToolCall
 from .session import ChatSession, SendResult, ToolEvent
+from .skills import SkillManager, SkillMeta
 from .tools import TOOL_MAP, TOOLS, execute_tool
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "ChatSession",
     "SendResult",
     "ToolEvent",
+    "SkillManager",
+    "SkillMeta",
     "TOOLS",
     "TOOL_MAP",
     "execute_tool",

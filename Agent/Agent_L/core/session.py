@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from .llm_client import LLMClient, LLMError, ToolCall
+from .skills import SkillManager, set_active_manager
 from .tools import TOOLS, execute_tool, tool_result_content
 
 TextCallback = Callable[[str], None]
@@ -24,6 +26,14 @@ ToolResultCallback = Callable[["ToolEvent"], None]
 
 DEFAULT_HISTORY_FILE = "chat_history.json"
 DEFAULT_MAX_TOOL_ROUNDS = 8
+
+# Skill 详细内容按需加载，系统提示只描述「有哪些 Skill、如何加载」。
+# 无可用 Skill 时不注入任何 system 消息，保持原有消息结构不变。
+BASE_SYSTEM_PROMPT = (
+    "你是 Agent_L，一个运行在终端中的智能助手。"
+    "可以调用工具完成文件操作、联网搜索、网页抓取、命令行执行和 Skill 加载等任务。"
+    "请根据用户需求选择合适的工具，并基于工具返回的结果给出准确、简洁的中文回答。"
+)
 
 
 @dataclass
@@ -57,6 +67,7 @@ class ChatSession:
         history_file: Union[str, Path] = DEFAULT_HISTORY_FILE,
         tools: Optional[Sequence[Dict[str, Any]]] = None,
         max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
+        project_root: Optional[Union[str, Path]] = None,
     ):
         self._llm = llm_client
         self._history_file = Path(history_file)
@@ -64,6 +75,14 @@ class ChatSession:
         self._max_tool_rounds = max(1, int(max_tool_rounds))
         self._messages: List[Dict[str, Any]] = []
         self.last_error: Optional[str] = None
+
+        # 会话初始化阶段只扫描 Skill 元数据；默认以程序启动时的工作目录为项目根
+        self._skill_manager = SkillManager(
+            project_root if project_root is not None else os.getcwd()
+        )
+        set_active_manager(self._skill_manager)
+        self._system_prompt = self._build_system_prompt()
+
         self.load_history()
 
     # ------------------------------------------------------------------ 历史
@@ -106,6 +125,28 @@ class ChatSession:
             self.last_error = f"保存对话历史失败：{exc}"
             return False
 
+    # ------------------------------------------------------------------ Skill
+    @property
+    def system_prompt(self) -> str:
+        """注入 Skill 列表后的系统提示；无可用 Skill 时为空字符串。"""
+        return self._system_prompt
+
+    @property
+    def skill_manager(self) -> SkillManager:
+        return self._skill_manager
+
+    def _build_system_prompt(self) -> str:
+        section = self._skill_manager.build_prompt_section()
+        if not section:
+            return ""
+        return f"{BASE_SYSTEM_PROMPT}\n\n{section}"
+
+    def _build_messages(self) -> List[Dict[str, Any]]:
+        """系统提示只在本次请求中前置，不写入历史文件，避免重复持久化。"""
+        if not self._system_prompt:
+            return self._messages
+        return [{"role": "system", "content": self._system_prompt}, *self._messages]
+
     # ------------------------------------------------------------------ 对话
     def send_message(
         self,
@@ -123,12 +164,14 @@ class ChatSession:
         """
         self._messages.append({"role": "user", "content": text})
         events: List[ToolEvent] = []
+        # 绑定本次会话的 SkillManager，保证 loadSkill 读取正确的 Skill 目录
+        set_active_manager(self._skill_manager)
 
         try:
             # 预留一轮给最终文本回复，其余为工具调用轮次
             for _ in range(self._max_tool_rounds + 1):
                 response = self._llm.stream_chat(
-                    self._messages,
+                    self._build_messages(),
                     tools=self._tools,
                     on_text=on_text,
                     on_tool_call=on_tool_call,

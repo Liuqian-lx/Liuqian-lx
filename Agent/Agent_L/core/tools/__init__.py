@@ -2,7 +2,8 @@
 
 对外提供：
 - TOOLS：合并后的工具 schema 列表
-  （2 个内置工具 + 10 个文件工具 + 1 个联网搜索工具 + 1 个网页正文提取工具）
+  （2 个内置工具 + 10 个文件工具 + 1 个联网搜索工具 + 1 个网页正文提取工具
+   + 1 个命令行执行工具 + 1 个技能加载工具 + 1 个技能创建工具）
 - TOOL_MAP：工具名 -> 可调用函数
 - execute_tool(name, arguments)：统一解析参数、执行工具、捕获异常
 """
@@ -14,19 +15,36 @@ from typing import Any, Dict, Optional
 
 from .builtin import TOOLS as BUILTIN_TOOLS
 from .builtin import TOOL_MAP as BUILTIN_TOOL_MAP
+from .create_skill import TOOLS as CREATE_SKILL_TOOLS
+from .create_skill import TOOL_MAP as CREATE_SKILL_TOOL_MAP
 from .file_ops import TOOLS as FILE_TOOLS
 from .file_ops import TOOL_MAP as FILE_TOOL_MAP
+from .run_cli import TOOLS as RUN_CLI_TOOLS
+from .run_cli import TOOL_MAP as RUN_CLI_TOOL_MAP
+from .skill_loader import TOOLS as SKILL_TOOLS
+from .skill_loader import TOOL_MAP as SKILL_TOOL_MAP
 from .web_fetch import TOOLS as WEB_FETCH_TOOLS
 from .web_fetch import TOOL_MAP as WEB_FETCH_TOOL_MAP
 from .web_search import TOOLS as WEB_SEARCH_TOOLS
 from .web_search import TOOL_MAP as WEB_SEARCH_TOOL_MAP
 
-TOOLS = BUILTIN_TOOLS + FILE_TOOLS + WEB_SEARCH_TOOLS + WEB_FETCH_TOOLS
+TOOLS = (
+    BUILTIN_TOOLS
+    + FILE_TOOLS
+    + WEB_SEARCH_TOOLS
+    + WEB_FETCH_TOOLS
+    + RUN_CLI_TOOLS
+    + SKILL_TOOLS
+    + CREATE_SKILL_TOOLS
+)
 TOOL_MAP = {
     **BUILTIN_TOOL_MAP,
     **FILE_TOOL_MAP,
     **WEB_SEARCH_TOOL_MAP,
     **WEB_FETCH_TOOL_MAP,
+    **RUN_CLI_TOOL_MAP,
+    **SKILL_TOOL_MAP,
+    **CREATE_SKILL_TOOL_MAP,
 }
 
 __all__ = ["TOOLS", "TOOL_MAP", "execute_tool", "tool_result_content"]

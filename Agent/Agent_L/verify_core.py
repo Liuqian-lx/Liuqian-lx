@@ -5,16 +5,24 @@
 
 它用假的 LLM 客户端驱动完整的工具调用闭环，用来证明：
 1. core 层可以在完全没有 tui 的情况下独立运行；
-2. 14 个工具、流式回调、工具闭环、历史加载/保存均正常；
+2. 17 个工具、流式回调、工具闭环、历史加载/保存均正常；
 3. searchWeb 的配置缺失/空 query/网络与 HTTP 异常/结果归一化均可离线验证；
 4. fetchWebPage 的空/非法 URL、curl 缺失/超时、HTTP 错误、解析异常、空正文、
-   截断与 trafilatura 正文提取均可离线验证。
+   截断与 trafilatura 正文提取均可离线验证；
+5. RunCli 的空命令、参数列表拼装、命令不存在、超时、系统错误、输出截断、
+   非 0 退出码、无 shell=True 均可离线验证（只执行安全的内置命令）；
+6. Skill 扫描/元数据提取/惰性加载、system prompt 注入、loadSkill 的
+   SKILL.md 与附件读取、路径穿越拦截、多匹配候选与各类错误均可离线验证；
+7. createSkill 的名称校验、防覆盖、路径沙箱、Frontmatter 规范化与
+   SkillManager 即时刷新均可离线验证。
 """
 
 from __future__ import annotations
 
 import io
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,7 +33,13 @@ from pathlib import Path
 from core.config import load_config
 from core.llm_client import LLMResponse, ToolCall
 from core.session import ChatSession
-from core.tools import TOOL_MAP, TOOLS, execute_tool, web_fetch, web_search
+from core.skills import (
+    SkillManager,
+    get_active_manager,
+    parse_frontmatter,
+    set_active_manager,
+)
+from core.tools import TOOL_MAP, TOOLS, execute_tool, run_cli, web_fetch, web_search
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -83,6 +97,17 @@ class SearchStubLLM:
         return LLMResponse(content=text)
 
 
+class CaptureStubLLM:
+    """单轮假模型：记录实际收到的 messages，用于检查 system prompt 注入位置。"""
+
+    def __init__(self):
+        self.messages = None
+
+    def stream_chat(self, messages, tools=None, on_text=None, on_tool_call=None):
+        self.messages = list(messages)
+        return LLMResponse(content="收到。")
+
+
 def main() -> int:
     passed = 0
 
@@ -100,8 +125,13 @@ def main() -> int:
     print(f"       model    = {config.model_name}")
 
     names = [tool["function"]["name"] for tool in TOOLS]
-    ok("工具总数为 14 且无重名", len(names) == 14 and len(set(names)) == 14)
+    ok("工具总数为 17 且无重名", len(names) == 17 and len(set(names)) == 17)
     ok("searchWeb 已注册到 schema 与 TOOL_MAP", "searchWeb" in names and "searchWeb" in TOOL_MAP)
+    ok("loadSkill 已注册到 schema 与 TOOL_MAP", "loadSkill" in names and "loadSkill" in TOOL_MAP)
+    ok(
+        "createSkill 已注册到 schema 与 TOOL_MAP",
+        "createSkill" in names and "createSkill" in TOOL_MAP,
+    )
 
     date_result = execute_tool("getDate", "")
     ok("内置工具 getDate", bool(date_result.get("success") and date_result.get("result")))
@@ -483,6 +513,586 @@ def main() -> int:
             and "subprocess.run(" in fetch_source
             and "shell=True" not in fetch_source,
         )
+
+        # ---------------------------------------------------------- RunCli 离线自测
+        run_schema = next(
+            tool["function"] for tool in TOOLS if tool["function"]["name"] == "RunCli"
+        )
+        run_params = run_schema["parameters"]["properties"]
+        ok(
+            "RunCli 已注册，schema 以 command 为必填、args 为字符串数组",
+            "RunCli" in TOOL_MAP
+            and run_schema["parameters"]["required"] == ["command"]
+            and run_params["command"]["type"] == "string"
+            and run_params["args"]["type"] == "array"
+            and run_params["args"]["items"]["type"] == "string",
+        )
+
+        empty_command = execute_tool("RunCli", json.dumps({"command": "   "}))
+        missing_command = execute_tool("RunCli", "{}")
+        ok(
+            "RunCli 空命令/缺少 command 返回结构化错误",
+            empty_command.get("success") is False
+            and empty_command.get("error") == "命令名称不能为空"
+            and missing_command.get("success") is False
+            and missing_command.get("error") == "命令名称不能为空",
+        )
+
+        bad_args = execute_tool("RunCli", json.dumps({"command": "python", "args": "-V"}))
+        ok(
+            "RunCli args 非数组返回结构化错误",
+            bad_args.get("success") is False
+            and bad_args.get("error") == "参数 args 必须是字符串数组",
+        )
+
+        not_found = execute_tool(
+            "RunCli", json.dumps({"command": "agent_l_missing_command_for_verify"})
+        )
+        ok(
+            "RunCli 不存在的命令返回未找到",
+            not_found.get("success") is False
+            and not_found.get("error") == "未找到命令：agent_l_missing_command_for_verify",
+        )
+
+        original_run_process = run_cli._run_process
+        captured = {}
+        try:
+            def fake_run(argv):
+                captured["argv"] = list(argv)
+                return subprocess.CompletedProcess(argv, 0, b"ok", b"")
+
+            run_cli._run_process = fake_run
+            with_args = execute_tool(
+                "RunCli",
+                json.dumps({"command": "python", "args": ["-c", "print('hi')"]}),
+            )
+            ok(
+                "RunCli 程序名与参数按列表拼装",
+                with_args.get("success") is True
+                and captured["argv"] == ["python", "-c", "print('hi')"]
+                and with_args["result"]["command"] == "python"
+                and with_args["result"]["args"] == ["-c", "print('hi')"]
+                and with_args["result"]["exit_code"] == 0,
+            )
+
+            no_args = execute_tool("RunCli", json.dumps({"command": "python"}))
+            ok(
+                "RunCli 省略 args 时默认为空列表",
+                no_args.get("success") is True
+                and captured["argv"] == ["python"]
+                and no_args["result"]["args"] == [],
+            )
+
+            def long_output_run(argv):
+                return subprocess.CompletedProcess(
+                    argv,
+                    0,
+                    b"a" * 5000,
+                    b"b" * 4500,
+                )
+
+            run_cli._run_process = long_output_run
+            truncated = execute_tool("RunCli", json.dumps({"command": "python"}))
+            stdout = truncated["result"]["stdout"]
+            stderr = truncated["result"]["stderr"]
+            ok(
+                "RunCli stdout/stderr 各截断到前 4000 字符并标注",
+                truncated.get("success") is True
+                and stdout == "a" * run_cli.MAX_OUTPUT_CHARS + run_cli.TRUNCATE_MARKER
+                and stderr == "b" * run_cli.MAX_OUTPUT_CHARS + run_cli.TRUNCATE_MARKER
+                and "输出已截断" in stdout
+                and "输出已截断" in stderr,
+            )
+
+            def timeout_run(argv):
+                raise subprocess.TimeoutExpired(argv, run_cli.TIMEOUT_SECONDS)
+
+            run_cli._run_process = timeout_run
+            timeout_result = execute_tool("RunCli", json.dumps({"command": "python"}))
+            ok(
+                "RunCli 执行超时返回结构化错误",
+                timeout_result.get("success") is False
+                and timeout_result.get("error") == "命令执行超时（30秒）",
+            )
+
+            def permission_run(argv):
+                raise PermissionError("拒绝访问")
+
+            run_cli._run_process = permission_run
+            permission_result = execute_tool("RunCli", json.dumps({"command": "python"}))
+            ok(
+                "RunCli 权限不足等系统错误返回结构化错误",
+                permission_result.get("success") is False
+                and permission_result.get("error") == "命令执行失败：拒绝访问",
+            )
+        finally:
+            run_cli._run_process = original_run_process
+
+        real_ok = execute_tool(
+            "RunCli",
+            json.dumps({"command": sys.executable, "args": ["-c", "print('agent-l-ok')"]}),
+        )
+        ok(
+            "RunCli 实际执行安全命令返回 stdout 与退出码 0",
+            real_ok.get("success") is True
+            and real_ok["result"]["exit_code"] == 0
+            and "agent-l-ok" in real_ok["result"]["stdout"],
+        )
+
+        real_fail = execute_tool(
+            "RunCli",
+            json.dumps(
+                {
+                    "command": sys.executable,
+                    "args": [
+                        "-c",
+                        "import sys; sys.stderr.write('boom'); sys.exit(3)",
+                    ],
+                }
+            ),
+        )
+        ok(
+            "RunCli 非 0 退出码仍返回 success=true 并携带 exit_code",
+            real_fail.get("success") is True
+            and real_fail["result"]["exit_code"] == 3
+            and "boom" in real_fail["result"]["stderr"],
+        )
+
+        run_cli_source = (BASE_DIR / "core" / "tools" / "run_cli.py").read_text(
+            encoding="utf-8"
+        )
+        ok(
+            "RunCli 使用参数列表执行且不存在 shell=True",
+            "subprocess.run(" in run_cli_source
+            and "shell=False" in run_cli_source
+            and "[name, *arg_list]" in run_cli_source
+            and "shell=True" not in run_cli_source,
+        )
+
+        # ---------------------------------------------------------- Skill 离线自测
+        skills_base = workdir / ".agents" / "skills"
+
+        def write_skill(dirname, content=None, files=None, raw=None):
+            directory = skills_base / dirname
+            directory.mkdir(parents=True, exist_ok=True)
+            if raw is not None:
+                (directory / "SKILL.md").write_bytes(raw)
+            else:
+                (directory / "SKILL.md").write_text(content or "", encoding="utf-8")
+            for relative, text in (files or {}).items():
+                target = directory / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            return directory
+
+        pdf_dir = write_skill(
+            "pdf",
+            "---\nname: pdf\ndescription: 处理 PDF 文档的读取与摘要\n---\n\n"
+            "# PDF Skill\n\n完整用法正文。\n",
+            {
+                "notes/tips.md": "TIPS-内容",
+                "notes/intro.md": "INTRO-A",
+                "extra/intro.md": "INTRO-B",
+            },
+        )
+        (pdf_dir / "binary.bin").write_bytes(b"\xff\xfe\x00bad")
+
+        write_skill(
+            "writer",
+            "---\nname: writer\ndescription: >-\n  写作与润色\n  助手\n---\n\n写作正文。\n",
+        )
+        # 正文含非法 UTF-8 字节：若初始化读取全文就会解析失败
+        write_skill(
+            "lazy",
+            raw=(
+                "---\nname: lazy\ndescription: 懒加载元数据测试\n---\n".encode("utf-8")
+                + b"\xff\xfe\x00BODY"
+            ),
+        )
+        write_skill("broken", "# 没有 Frontmatter 的正文\n")
+        write_skill("partial", "---\nname: partial-skill\n---\n正文\n")
+        write_skill("pdf-copy", "---\nname: pdf\ndescription: 重复名称\n---\n")
+        (skills_base / "empty-dir").mkdir(parents=True, exist_ok=True)
+        (skills_base / "README.md").write_text("not a skill", encoding="utf-8")
+
+        secret_file = workdir / ".agents" / "secret.txt"
+        secret_file.write_text("TOP-SECRET", encoding="utf-8")
+
+        manager = SkillManager(workdir)
+        ok(
+            "Skill 扫描：仅一级子目录、按目录名排序、重名保留第一个",
+            manager.names == ["lazy", "pdf", "writer"],
+        )
+        pdf_meta = manager.get("pdf")
+        ok(
+            "Skill 元数据提取 name/description 与目录",
+            pdf_meta is not None
+            and pdf_meta.description == "处理 PDF 文档的读取与摘要"
+            and pdf_meta.directory == pdf_dir,
+        )
+        writer_meta = manager.get("writer")
+        ok(
+            "Skill Frontmatter 支持折叠块标量",
+            writer_meta is not None and writer_meta.description == "写作与润色 助手",
+        )
+        ok(
+            "缺少 SKILL.md/Frontmatter/必填字段/重名的 Skill 被静默跳过",
+            any("empty-dir" in item and "SKILL.md" in item for item in manager.errors)
+            and any("broken" in item and "Frontmatter" in item for item in manager.errors)
+            and any(
+                "partial" in item and "name 或 description" in item
+                for item in manager.errors
+            )
+            and any("pdf-copy" in item and "名称重复" in item for item in manager.errors)
+            and len(manager.errors) == 4,
+        )
+        ok(
+            "Skill 根目录不存在时静默跳过",
+            SkillManager(workdir / "no-such-project").names == []
+            and SkillManager(workdir / "no-such-project").errors == [],
+        )
+
+        skill_session = ChatSession(
+            StubLLM(pdf_dir),
+            history_file=workdir / "skill_history.json",
+            project_root=workdir,
+        )
+        prompt = skill_session.system_prompt
+        ok(
+            "Skill 列表按格式追加到 system prompt 且不预载全文",
+            "## 可用 Skills" in prompt
+            and "- pdf: 处理 PDF 文档的读取与摘要" in prompt
+            and "- writer: 写作与润色 助手" in prompt
+            and "loadSkill" in prompt
+            and "完整用法正文" not in prompt,
+        )
+        no_skill_session = ChatSession(
+            StubLLM(workdir),
+            history_file=workdir / "no_skill_history.json",
+            project_root=workdir / "no-such-project",
+        )
+        ok("无可用 Skill 时 system prompt 保持为空", no_skill_session.system_prompt == "")
+
+        capture = CaptureStubLLM()
+        capture_session = ChatSession(
+            capture,
+            history_file=workdir / "capture_history.json",
+            project_root=workdir,
+        )
+        capture_result = capture_session.send_message("你好")
+        saved_messages = json.loads(
+            (workdir / "capture_history.json").read_text(encoding="utf-8")
+        )
+        ok(
+            "system prompt 仅用于请求，不写入历史文件",
+            capture_result.content == "收到。"
+            and capture.messages is not None
+            and capture.messages[0]["role"] == "system"
+            and "## 可用 Skills" in capture.messages[0]["content"]
+            and all(item.get("role") != "system" for item in capture_session.get_history())
+            and all(item.get("role") != "system" for item in saved_messages),
+        )
+
+        skill_schema = next(
+            tool["function"] for tool in TOOLS if tool["function"]["name"] == "loadSkill"
+        )
+        skill_params = skill_schema["parameters"]
+        ok(
+            "loadSkill schema：name 必填，filename 可选",
+            skill_params["required"] == ["name"]
+            and skill_params["properties"]["name"]["type"] == "string"
+            and skill_params["properties"]["filename"]["type"] == "string",
+        )
+
+        previous_manager = get_active_manager()
+        set_active_manager(manager)
+        try:
+            default_read = execute_tool("loadSkill", json.dumps({"name": "pdf"}))
+            ok(
+                "loadSkill 默认读取 SKILL.md 全文",
+                default_read.get("success") is True
+                and default_read["result"]["skill_name"] == "pdf"
+                and default_read["result"]["file"] == "SKILL.md"
+                and "完整用法正文" in default_read["result"]["content"],
+            )
+
+            relative_read = execute_tool(
+                "loadSkill", json.dumps({"name": "pdf", "filename": "notes/tips.md"})
+            )
+            ok(
+                "loadSkill 读取 Skill 目录内相对路径附件",
+                relative_read.get("success") is True
+                and relative_read["result"]["file"] == "notes/tips.md"
+                and relative_read["result"]["content"] == "TIPS-内容",
+            )
+
+            name_read = execute_tool(
+                "loadSkill", json.dumps({"name": "pdf", "filename": "tips.md"})
+            )
+            ok(
+                "loadSkill 按文件名递归搜索唯一匹配",
+                name_read.get("success") is True
+                and name_read["result"]["file"] == "notes/tips.md"
+                and name_read["result"]["content"] == "TIPS-内容",
+            )
+
+            absolute_read = execute_tool(
+                "loadSkill",
+                json.dumps(
+                    {"name": "pdf", "filename": str(pdf_dir / "notes" / "tips.md")}
+                ),
+            )
+            ok(
+                "loadSkill 允许读取 Skill 目录内的绝对路径",
+                absolute_read.get("success") is True
+                and absolute_read["result"]["content"] == "TIPS-内容",
+            )
+
+            traversals = [
+                "../secret.txt",
+                "notes/../../secret.txt",
+                str(secret_file),
+            ]
+            traversal_results = [
+                execute_tool("loadSkill", json.dumps({"name": "pdf", "filename": value}))
+                for value in traversals
+            ]
+            ok(
+                "loadSkill 拦截 ../ 与目录外绝对路径穿越",
+                all(
+                    item.get("success") is False
+                    and item.get("error") == "路径超出 Skill 目录范围，禁止访问"
+                    for item in traversal_results
+                ),
+            )
+
+            multi = execute_tool(
+                "loadSkill", json.dumps({"name": "pdf", "filename": "intro.md"})
+            )
+            multi_payload = multi.get("result") or {}
+            ok(
+                "loadSkill 同名文件多匹配时返回候选路径列表",
+                multi.get("success") is True
+                and len(multi_payload.get("matches", [])) == 2
+                and multi_payload.get("hint") == "存在多个匹配文件，请指定完整路径"
+                and all(os.path.isabs(item) for item in multi_payload["matches"]),
+            )
+
+            chosen_read = execute_tool(
+                "loadSkill",
+                json.dumps({"name": "pdf", "filename": multi_payload["matches"][0]}),
+            )
+            ok(
+                "loadSkill 可用候选完整路径再次读取",
+                chosen_read.get("success") is True
+                and chosen_read["result"]["content"] in ("INTRO-A", "INTRO-B"),
+            )
+
+            missing_skill = execute_tool("loadSkill", json.dumps({"name": "missing"}))
+            ok(
+                "loadSkill 未找到 Skill 返回中文错误",
+                missing_skill.get("success") is False
+                and missing_skill.get("error") == "未找到指定的 Skill：missing",
+            )
+
+            missing_file = execute_tool(
+                "loadSkill", json.dumps({"name": "pdf", "filename": "nope.md"})
+            )
+            ok(
+                "loadSkill 未找到附件返回中文错误",
+                missing_file.get("success") is False
+                and missing_file.get("error") == "Skill 中未找到指定文件：nope.md",
+            )
+
+            encoding_error = execute_tool(
+                "loadSkill", json.dumps({"name": "pdf", "filename": "binary.bin"})
+            )
+            ok(
+                "loadSkill 非 UTF-8 文件返回编码错误",
+                encoding_error.get("success") is False
+                and "编码错误" in encoding_error.get("error", ""),
+            )
+
+            lazy_read = execute_tool("loadSkill", json.dumps({"name": "lazy"}))
+            ok(
+                "初始化不读取正文：非法正文字节不影响元数据",
+                "lazy" in manager.names
+                and lazy_read.get("success") is False
+                and "编码错误" in lazy_read.get("error", ""),
+            )
+
+            skill_source = (
+                BASE_DIR / "core" / "tools" / "skill_loader.py"
+            ).read_text(encoding="utf-8")
+            ok(
+                "loadSkill 使用 realpath + commonpath 实现沙箱",
+                "os.path.realpath(" in skill_source
+                and "os.path.commonpath(" in skill_source,
+            )
+        finally:
+            set_active_manager(previous_manager)
+
+        # ------------------------------------------------------ createSkill 离线自测
+        create_schema = next(
+            tool["function"] for tool in TOOLS if tool["function"]["name"] == "createSkill"
+        )
+        create_params = create_schema["parameters"]
+        ok(
+            "createSkill schema：name 与 skillContext 必填",
+            create_params["required"] == ["name", "skillContext"]
+            and create_params["properties"]["name"]["type"] == "string"
+            and create_params["properties"]["skillContext"]["type"] == "string",
+        )
+
+        previous_cwd = os.getcwd()
+        previous_active = get_active_manager()
+        os.chdir(workdir)
+        try:
+            invalid_names = ["", "Bad-Name", "-start", "end-", "../escape", "a/b", "中文"]
+            invalid_results = [
+                execute_tool(
+                    "createSkill",
+                    json.dumps({"name": value, "skillContext": "# x"}, ensure_ascii=False),
+                )
+                for value in invalid_names
+            ]
+            ok(
+                "createSkill 名称仅允许 kebab-case",
+                all(
+                    item.get("success") is False
+                    and item.get("error")
+                    == "Skill 名称不合法，仅允许小写字母、数字和连字符（kebab-case 格式）"
+                    for item in invalid_results
+                )
+                and not (workdir / "escape").exists(),
+            )
+
+            new_skill_dir = workdir / ".agents" / "skills" / "demo-skill"
+            created = execute_tool(
+                "createSkill",
+                json.dumps(
+                    {"name": "demo-skill", "skillContext": "# Demo\n\n这是演示正文。"},
+                    ensure_ascii=False,
+                ),
+            )
+            skill_file = new_skill_dir / "SKILL.md"
+            created_text = (
+                skill_file.read_text(encoding="utf-8") if skill_file.is_file() else ""
+            )
+            ok(
+                "createSkill 创建目录并自动生成 Frontmatter",
+                created.get("success") is True
+                and created["result"]
+                == {
+                    "skill_name": "demo-skill",
+                    "skill_path": ".agents/skills/demo-skill",
+                    "file": "SKILL.md",
+                    "message": "Skill 创建成功，已可被加载使用",
+                }
+                and new_skill_dir.is_dir()
+                and created_text.startswith("---\nname: demo-skill\ndescription: ")
+                and "这是演示正文" in created_text,
+            )
+
+            duplicate = execute_tool(
+                "createSkill",
+                json.dumps(
+                    {"name": "demo-skill", "skillContext": "覆盖尝试"},
+                    ensure_ascii=False,
+                ),
+            )
+            ok(
+                "createSkill 已存在时拒绝覆盖",
+                duplicate.get("success") is False
+                and duplicate.get("error") == "Skill demo-skill 已存在，禁止覆盖原有内容"
+                and skill_file.read_text(encoding="utf-8") == created_text,
+            )
+
+            fixed = execute_tool(
+                "createSkill",
+                json.dumps(
+                    {
+                        "name": "fixed-skill",
+                        "skillContext": "---\nname: wrong-name\nauthor: me\n---\n"
+                        "# 标题\n正文内容。\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            fixed_text = (
+                workdir / ".agents" / "skills" / "fixed-skill" / "SKILL.md"
+            ).read_text(encoding="utf-8")
+            fixed_meta = parse_frontmatter(fixed_text) or {}
+            ok(
+                "createSkill 补全 name/description 并保留其他字段",
+                fixed.get("success") is True
+                and fixed_meta.get("name") == "fixed-skill"
+                and fixed_meta.get("description") == "# 标题 正文内容。"
+                and fixed_meta.get("author") == "me",
+            )
+
+            kept = execute_tool(
+                "createSkill",
+                json.dumps(
+                    {
+                        "name": "kept-skill",
+                        "skillContext": "---\nname: kept-skill\n"
+                        "description: 已有描述\n---\n正文\n",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            kept_meta = parse_frontmatter(
+                (
+                    workdir / ".agents" / "skills" / "kept-skill" / "SKILL.md"
+                ).read_text(encoding="utf-8")
+            ) or {}
+            ok(
+                "createSkill 保留已有 description",
+                kept.get("success") is True
+                and kept_meta.get("description") == "已有描述",
+            )
+
+            create_manager = SkillManager(workdir)
+            set_active_manager(create_manager)
+            reloaded = execute_tool(
+                "createSkill",
+                json.dumps(
+                    {"name": "reload-skill", "skillContext": "# 新技能\n正文"},
+                    ensure_ascii=False,
+                ),
+            )
+            loaded = execute_tool("loadSkill", json.dumps({"name": "reload-skill"}))
+            ok(
+                "createSkill 创建后刷新 SkillManager 并可被 loadSkill 读取",
+                reloaded.get("success") is True
+                and "reload-skill" in create_manager.names
+                and loaded.get("success") is True
+                and "新技能" in loaded["result"]["content"],
+            )
+
+            create_source = (BASE_DIR / "core" / "tools" / "create_skill.py").read_text(
+                encoding="utf-8"
+            )
+            ok(
+                "createSkill 使用 realpath + commonpath 实现沙箱",
+                "os.path.realpath(" in create_source
+                and "os.path.commonpath(" in create_source,
+            )
+        finally:
+            os.chdir(previous_cwd)
+            set_active_manager(previous_active)
+
+        core_sources = list((BASE_DIR / "core").rglob("*.py"))
+        leaks = [
+            path.name
+            for path in core_sources
+            if re.search(
+                r"(?m)^\s*(print|input)\s*\(",
+                path.read_text(encoding="utf-8"),
+            )
+        ]
+        ok("core 层不存在 print/input", not leaks)
 
         ok("全程未导入 tui 层", "tui" not in sys.modules)
     finally:
