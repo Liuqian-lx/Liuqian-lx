@@ -9,11 +9,17 @@
 Agent_L/
 ├── main.py                 # 唯一入口：加载配置 -> 初始化会话 -> 启动 TUI
 ├── config.ini              # 模型与联网搜索配置
+├── .mcp.json               # 外部 MCP 服务器配置（可选）
 ├── chat_history.json       # 对话历史（自动保存）
 ├── core/
 │   ├── config.py           # config.ini 解析（LLM 配置 + 可选搜索配置）
-│   ├── llm_client.py       # OpenAI 兼容流式客户端、tool_calls 聚合
-│   ├── session.py          # 上下文维护、Skill 注入、工具闭环、历史读写
+│   ├── context_manager.py  # Token 统计、上下文归档与全文关键词检索
+│   ├── llm_client.py       # OpenAI 兼容流式客户端、tool_calls 聚合、usage 采集
+│   ├── session.py          # 上下文维护、压缩、Skill 注入、工具闭环、历史读写
+│   ├── mcp/
+│   │   ├── config.py       # .mcp.json 解析与校验
+│   │   ├── client_manager.py # MCP 会话连接、工具发现、调用路由
+│   │   └── tool_adapter.py # MCP 工具 -> Function Call Schema / 结果包装
 │   ├── skills/
 │   │   ├── loader.py       # .agents/skills 扫描与 Frontmatter 解析
 │   │   └── manager.py      # Skill 生命周期、system prompt 段落生成
@@ -24,6 +30,7 @@ Agent_L/
 │       ├── web_search.py   # 联网搜索工具 searchWeb
 │       ├── web_fetch.py    # 网页正文提取工具 fetchWebPage
 │       ├── run_cli.py      # 命令行执行工具 RunCli
+│       ├── recall_context.py # 上下文归档检索工具 recallContext
 │       ├── skill_loader.py # 动态技能加载工具 loadSkill
 │       └── create_skill.py # 技能创建工具 createSkill
 ├── tui/                    # Textual 界面层（不含业务逻辑）
@@ -48,19 +55,25 @@ base_url = https://api.deepseek.com/v1
 model_name = deepseek-flash
 api_key = <你的大模型 API Key>
 
+# 可选：模型上下文窗口大小（Token）。不填写时按 128k 估算，界面标注「默认」
+# context_window = 128000
+
 # 联网搜索配置；留空时 searchWeb 返回结构化提示，不影响其他功能
 [search]
 baidu_qianfan_api_key = <你的百度千帆 API Key>
 ```
 
 - `[llm]` 为必填项，缺失时程序启动失败并提示。
+- `[llm] context_window` 为可选项，用于上下文占用比例计算；缺失或非法时
+  按 128k 兜底，并在 TUI 顶栏显示「默认」。
 - `[search]` 为可选项，缺失、为空或格式错误都不会中断程序。
 
 ## 工具列表
 
 所有工具统一返回 `{"success": True, "result": ...}` 或
 `{"success": False, "error": ...}`，由 `core/tools/__init__.py` 的
-`execute_tool` 统一解析与分发。
+`execute_tool` 统一解析与分发。除下表 19 个本地工具外，`.mcp.json`
+中配置的 MCP 服务器工具也会在启动时动态合并进来（见「外部 MCP 工具」）。
 
 | 工具名 | 用途 | 参数 |
 | --- | --- | --- |
@@ -81,6 +94,8 @@ baidu_qianfan_api_key = <你的百度千帆 API Key>
 | `RunCli` | 执行本地已安装的命令行程序 | `command`（string，必填），`args`（string 数组，可选） |
 | `loadSkill` | 按需加载 Skill 的 SKILL.md 或附件 | `name`（string，必填），`filename`（string，可选） |
 | `createSkill` | 根据内容创建新 Skill | `name`（string，必填），`skillContext`（string，必填） |
+| `createMCP` | 新增/更新 MCP 服务器配置并热重载 | `name`、`type`、`url`（必填），`command`、`args`、`env`、`cwd`、`headers`（可选） |
+| `recallContext` | 在上下文压缩归档中检索历史原文 | `text`（string，必填），`id`（string，可选） |
 
 ### searchWeb（联网搜索）
 
@@ -184,6 +199,78 @@ baidu_qianfan_api_key = <你的百度千帆 API Key>
   不会中断会话。
 - **安全说明**：本阶段按教学要求不实现命令白名单/黑名单或人工审批，命令以运行 Agent
   的当前用户权限执行；仅适用于受控的教学实验环境，切勿在不可信输入或生产环境中开放。
+
+## 外部 MCP 工具（MCP Client）
+
+程序启动时会读取**当前工作目录**下的 `.mcp.json`，连接其中配置的 MCP
+服务器，调用标准 `list_tools()` 获取工具列表，并转换为与本地工具完全一致的
+Function Calling Schema 后合并进 `TOOLS` / `TOOL_MAP`。所有 MCP 代码位于
+`core/mcp/`，`tui/` 无任何改动。
+
+### 配置文件
+
+```json
+{
+  "mcpServers": {
+    "Bazi-MCP": {
+      "type": "streamable_http",
+      "url": "https://mcp.api-inference.modelscope.net/4a3222faa31a4e/mcp"
+    },
+    "PetHospitalMCP": {
+      "type": "streamable_http",
+      "url": "http://127.0.0.1:8090/mcp"
+    },
+    "AnythingLLMMCP": {
+      "type": "streamable_http",
+      "url": "http://127.0.0.1:8091/mcp"
+    },
+    "LocalFiles": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["server.py"],
+      "env": {"API_KEY": "..."},
+      "cwd": "."
+    }
+  }
+}
+```
+
+- `type` 支持 `streamable_http`（需要 `url`）和 `stdio`（需要 `command`，
+  可选 `args` / `env` / `cwd`）；缺省时按 `command` / `url` 自动推断。
+- 支持 `headers`（HTTP 鉴权头）等标准字段；URL 首尾空白会被自动去除。
+- 文件不存在时静默跳过；JSON 损坏或单条配置不完整时只跳过对应条目，
+  不影响程序启动。
+- 配套的本地宠物医院 MCP 服务（`anytingLLMMCP` 目录，提供 `list_pets` /
+  `create_pet`）需先启动：运行其 `start.bat` 或 `python main.py`，默认监听
+  `0.0.0.0:8090`，端点为 `/mcp`。也可改用 stdio 配置由 Agent 直接拉起
+  （`python main.py --stdio`），无需常驻进程。
+- AnythingLLM 知识库 MCP 服务（`111/anythingllm-mcp`，提供 `workspace_chat` /
+  `workspace_file_count` / `workspace_search`）监听 `0.0.0.0:8091`，端点为
+  `/mcp`；其 `workspace_search` 是纯向量检索，不依赖聊天模型。
+- `D:\Liuqian-lx\PetHospitalMCP\windows\pethospital.exe` 是 Go 编写的 REST 服务
+  （默认 `127.0.0.1:8080`，网页界面 `/`、接口清单 `/api/v1/endpoints`），
+  **不实现 MCP 协议**，不要写入 `mcpServers`。
+- Python 版（`anytingLLMMCP`）与 exe 版使用**两份独立的 `data/pet.db` 副本**，
+  数据不会自动同步；MCP 能力统一由 Python 版提供。
+- 除手工编辑外，也可在会话中调用 `createMCP` 工具动态新增/更新服务器配置，
+  写入后自动热重载（见「createMCP 工具」）。
+
+### 工具命名与调用
+
+- 工具名直接沿用 MCP 服务器返回的名称。
+- 若**不同服务器存在同名工具**，或 MCP 工具与本地工具重名，对外暴露名
+  自动变为 `服务器名_工具名`（例如 `AnythingLLMMCP_list_pets`）；内部保留
+  原始工具名，调用时自动还原。
+- 参数 Schema 由 MCP `inputSchema` 转换而来，与本地工具风格一致。
+- 调用结果统一包装为 `{"success": True, "result": ...}` /
+  `{"success": False, "error": ...}`，兼容文本内容、结构化数据与错误信息。
+
+### 容错
+
+- 单个服务器连接失败 → 跳过该服务器，错误记录在 `get_mcp_manager().errors`；
+- 所有服务器都连接失败或未配置 → Agent 退化为纯本地工具模式，功能不受影响；
+- 所有连接与调用异常都会被捕获并作为工具结果返回给模型，程序不会崩溃；
+- 如需完全禁用 MCP（例如离线验证），设置环境变量 `AGENT_L_DISABLE_MCP=1`。
 
 ## 动态 Skills（Agent Skills）
 
@@ -318,14 +405,161 @@ description: 处理 PDF 文档的读取、拆分与内容摘要
 
 Skill 能力全部使用 Python 标准库实现，未新增第三方依赖；`tui/` 目录不受影响。
 
+### createMCP 工具
+
+- **名称**：`createMCP`
+- **用途**：把用户提供的 MCP 服务器配置写入**当前工作目录**的 `.mcp.json`，
+  支持下述两种协议；同名服务器会被覆盖更新，其他服务器保持不变。写入成功后
+  立即重载 MCP 管理器，新服务器的工具在同一会话的下一轮请求中即可使用，
+  **无需重启程序**。
+- **参数**：
+
+  | 参数 | 类型 | 必填 | 说明 |
+  | --- | --- | --- | --- |
+  | `name` | string | 是 | 服务器名称，字母/数字/点/下划线/连字符，1-64 字符 |
+  | `type` | string | 是 | `streamable_http` 或 `stdio`（兼容 `http`/`streamable-http` 写法） |
+  | `url` | string | 是 | MCP 服务地址；`stdio` 类型传空字符串 |
+  | `command` | string | 否 | `stdio` 类型必填，可执行程序 |
+  | `args` | string[] | 否 | `stdio` 类型的程序参数 |
+  | `env` | object | 否 | `stdio` 类型的环境变量 |
+  | `cwd` | string | 否 | `stdio` 类型的工作目录 |
+  | `headers` | object | 否 | `streamable_http` 类型的请求头 |
+
+- **安全校验**：
+  - 名称非法、协议类型不支持、HTTP 地址不是 `http(s)://`、`stdio` 缺少
+    `command` 时均返回结构化错误；
+  - 只写当前工作目录下的 `.mcp.json`，符号链接指向目录外时拒绝写入；
+  - 已有配置不是合法 JSON 或结构错误时**拒绝覆盖**，避免损坏用户配置；
+  - 采用临时文件 + `os.replace` 原子写入，失败不会留下半个文件。
+- **返回格式**：
+
+  ```json
+  {"success": true, "result": {"name": "PetHospitalMCP", "type": "streamable_http", "action": "created", "config_path": "...\\.mcp.json", "mcp_tool_count": 5, "mcp_tools": ["list_pets", "create_pet"], "mcp_errors": [], "message": "..."}}
+  ```
+
+- **热重载**：`core/tools/refresh_mcp_tools()` 关闭旧连接、重新读取配置、
+  发现工具，并同步更新 `TOOLS` / `TOOL_MAP` 与已创建的 `ChatSession`
+  （不修改 `session.py`）。
+
+## 上下文压缩与历史检索
+
+长时间任务会不断累积对话历史，最终占满模型上下文窗口。本功能采用
+**「原始上下文归档 + LLM 摘要压缩 + 本地关键词检索」** 的简单方案，
+不使用向量数据库或 Embedding，全部由 Python 标准库实现。
+
+### 1. 顶栏上下文使用量
+
+TUI 顶部栏醒目位置实时显示：
+
+```text
+上下文 32.4k / 128k（默认） · 25.3%
+```
+
+- `32.4k`：当前会话已占用的 Token（System Prompt + 用户消息 + 对话历史 +
+  工具调用与工具结果 + 工具定义）；
+- `128k`：模型上下文窗口；读取 `config.ini` 的 `context_window`，
+  未配置或无法获取时按 128k 兜底，并显示「默认」二字；
+- `25.3%`：占用百分比。
+
+Token 统计优先使用模型 API 在流式响应末尾返回的 `usage`
+（请求时自动带上 `stream_options.include_usage`，兼容接口不支持时会自动重试），
+取不到时按「英文约 4 字符 1 Token、中文 1 字符 1 Token」估算。
+
+每次 LLM 响应后都会刷新。达到窗口的 **60%** 时：
+
+- 界面显示黄色警告，提示执行 `/compact`；
+- 输入框占位文字切换为压缩提示；
+- xAgent 拒绝新的普通提示词（core 层同样会拒绝），直到压缩成功完成。
+
+### 2. `/compact` 手动压缩
+
+在输入框输入 `/compact` 并回车即可触发。压缩开始后：
+
+- 进入专门的压缩状态，输入框禁用，不会处理原任务；
+- **不执行任何 Function Calling 工具**，只调用 LLM 生成摘要；
+- 保存归档、替换上下文、写入历史等操作由 `ChatSession` 完成。
+
+执行流程：
+
+1. **保存原始上下文**：把当前 `messages` 逐行写入
+   `<项目根>/.agents/context/<编号>.jsonl`，编号形如 `20261022-153000`，
+   同一秒冲突时追加 `-1`、`-2`。每行是一条原始消息，保留 `role`、
+   `content`、`tool_calls` 参数、`tool_call_id`、工具返回结果与消息顺序。
+   写入采用临时文件 + `os.replace` 原子替换；**保存成功后才继续压缩**。
+2. **调用 LLM 生成摘要**：使用 `core/context_manager.py` 中的
+   `COMPACTION_SYSTEM_PROMPT`（上下文管理助手 Prompt），要求输出约
+   5,000 Tokens 的 Markdown 工作摘要。该次调用**不传 tools**，即使模型
+   返回 `tool_calls` 也会被忽略。
+3. **替换上下文**：历史消息被替换为一条摘要消息；System Prompt 与工具
+   定义保持不变。摘要末尾自动追加归档说明：
+
+   ```text
+   此前上下文已于 2026-10-22 15:30:00 完成压缩，原始上下文保存在编号为
+   20261022-153000 的归档文件中。如需查找历史信息，请使用 recallContext 工具。
+   ```
+
+4. **展示对比面板**：成功后弹出浮动面板，左栏为压缩前原文，右栏为压缩后
+   摘要，两栏独立滚动，右下角「关闭」按钮或 `Esc` 退出。原文超过 6 万字符
+   时面板只展示前 6 万字符，完整内容已写入归档。
+5. **解除限制**：成功后恢复输入；失败时保留原有上下文、提示错误，并允许
+   重新执行 `/compact`。
+
+### 3. recallContext 工具
+
+- **名称**：`recallContext`
+- **用途**：当 LLM 发现压缩摘要缺少历史细节时，主动检索原始归档。
+- **参数**：
+
+  | 参数 | 类型 | 必填 | 说明 |
+  | --- | --- | --- | --- |
+  | `text` | string | 是 | 关键词或文本内容；多个词以空格分隔时要求全部命中 |
+  | `id` | string | 否 | 指定归档编号；省略时检索 `.agents/context/` 下全部归档 |
+
+- **检索方式**：逐行读取 JSONL，对 `role`、`content`、工具名、工具调用参数、
+  `tool_call_id`、工具结果做大小写不敏感的全文关键词匹配。
+- **返回内容**：归档编号、行号、角色、命中次数与命中位置附近的原文片段；
+  最多返回 10 条，每条片段最多 400 字符，总长度控制在 4,000 字符以内，
+  避免检索结果再次占满上下文。
+- **返回示例**：
+
+  ```json
+  {
+    "success": true,
+    "result": {
+      "query": "alpha.txt",
+      "archive_id": "all",
+      "archive_count": 2,
+      "total_matches": 3,
+      "returned": 3,
+      "truncated": false,
+      "matches": [
+        {
+          "archive_id": "20261022-153000",
+          "line": 2,
+          "role": "assistant",
+          "score": 1,
+          "snippet": "tool_call id=call_1 name=read_file_content arguments={\"file_path\": \"alpha.txt\"}"
+        }
+      ]
+    }
+  }
+  ```
+
+- **错误处理**：空关键词、非法归档编号（含路径穿越）、归档不存在均返回
+  中文结构化错误，不会中断会话。
+
+该工具与其他本地工具一样注册在 `TOOLS` / `TOOL_MAP` 中，压缩后的摘要末尾
+会主动提示模型使用它。
+
 ## 验证
 
 ```bash
 python verify_core.py
 ```
 
-脚本不导入 `tui`、不发起真实网络请求，覆盖：配置读取、17 个工具注册与重名检查、
-内置/文件工具、流式回调、工具闭环、历史加载/保存，以及 `searchWeb` 的
+脚本不导入 `tui`、不发起真实网络请求，覆盖：配置读取（含可选
+`context_window`）、19 个工具注册与重名检查、内置/文件工具、流式回调、
+工具闭环、历史加载/保存，以及 `searchWeb` 的
 未配置 Key、空 query、网络异常、HTTP 错误、非法 JSON、结果归一化与空结果，
 `fetchWebPage` 的空/非法 URL、curl 缺失/超时、网络失败、HTTP 4xx、
 解析异常、空正文、8000 字符截断与 trafilatura 正文提取，
@@ -334,7 +568,10 @@ python verify_core.py
 以及 Skill 扫描/Frontmatter 解析/重名与非法项跳过、system prompt 注入格式、
 `loadSkill` 的 SKILL.md 与附件读取、路径穿越拦截、多匹配候选、Skill/文件不存在、
 非 UTF-8 编码错误，`createSkill` 的名称校验、防覆盖、Frontmatter 规范化、
-即时刷新与路径沙箱，以及 core 层无 `print`/`input` 静态检查。
+即时刷新与路径沙箱，`createMCP` 的配置写入/覆盖/异常拒绝，以及
+上下文 Token 估算与 128k 默认窗口、API usage 优先、JSONL 归档格式、
+`/compact` 压缩替换与失败保留原上下文、60% 阈值拦截、`recallContext`
+的全文检索与参数校验，最后执行 core 层无 `print`/`input` 静态检查。
 
 ### 示例 Skill 测试步骤
 

@@ -9,13 +9,14 @@ from __future__ import annotations
 import configparser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 DEFAULT_CONFIG_FILE = "config.ini"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / DEFAULT_CONFIG_FILE
 CONFIG_SECTION = "llm"
 SEARCH_SECTION = "search"
 SEARCH_API_KEY_OPTION = "baidu_qianfan_api_key"
+CONTEXT_WINDOW_OPTION = "context_window"
 
 
 class ConfigError(Exception):
@@ -24,11 +25,16 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """大模型连接配置。"""
+    """大模型连接配置。
+
+    context_window 为可选的模型上下文窗口（Token）；未配置或非法时为 None，
+    由上下文管理器按 128k 兜底并在界面标注「默认」。
+    """
 
     base_url: str
     model_name: str
     api_key: str
+    context_window: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,7 @@ def load_config(config_path: Union[str, Path] = DEFAULT_CONFIG_FILE) -> LLMConfi
         base_url = section["base_url"].strip()
         model_name = section["model_name"].strip()
         api_key = section["api_key"].strip()
+        raw_window = section.get(CONTEXT_WINDOW_OPTION, "")
     except (KeyError, configparser.Error) as exc:
         raise ConfigError(f"配置缺失或格式错误：{exc}") from exc
 
@@ -69,7 +76,21 @@ def load_config(config_path: Union[str, Path] = DEFAULT_CONFIG_FILE) -> LLMConfi
     if missing:
         raise ConfigError(f"配置缺失：{', '.join(missing)}")
 
-    return LLMConfig(base_url=base_url, model_name=model_name, api_key=api_key)
+    return LLMConfig(
+        base_url=base_url,
+        model_name=model_name,
+        api_key=api_key,
+        context_window=_parse_positive_int(raw_window),
+    )
+
+
+def _parse_positive_int(raw: object) -> Optional[int]:
+    """把配置值解析为正整数；空值或非法值返回 None。"""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def load_search_config(config_path: Union[str, Path] = DEFAULT_CONFIG_PATH) -> SearchConfig:

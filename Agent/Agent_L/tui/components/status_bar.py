@@ -15,7 +15,7 @@ class StatusBar(Horizontal):
         self._count = Static("0 条消息", id="status-count", markup=False)
         self._state = Static("就绪", id="status-state", markup=False)
         self._keys = Static(
-            "Enter 发送 · Ctrl+L 清屏 · Ctrl+S 保存 · Ctrl+Q 退出",
+            "Enter 发送 · /compact 压缩上下文 · Ctrl+L 清屏 · Ctrl+S 保存 · Ctrl+Q 退出",
             id="status-keys",
             markup=False,
         )

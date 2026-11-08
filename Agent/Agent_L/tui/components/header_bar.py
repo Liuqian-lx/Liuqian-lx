@@ -18,14 +18,22 @@ class HeaderBar(Horizontal):
         self._model_name = model_name
         self._online: Optional[bool] = None
         self._title = Static("◆ Agent_L 文件助手", classes="header-title", markup=False)
+        # 注意：不要命名为 _context，Textual 的 MessagePump 内部已占用该方法名
+        self._context_label = Static("", classes="header-context", markup=False)
         self._status = Static("", classes="header-status")
 
     def compose(self) -> ComposeResult:
         yield self._title
+        yield self._context_label
         yield self._status
 
     def on_mount(self) -> None:
         self._refresh()
+
+    def set_context(self, text: str, warn: bool = False) -> None:
+        """显示上下文使用量；warn=True 时使用警示色。"""
+        self._context_label.update(text)
+        self._context_label.set_class(warn, "warn")
 
     def set_online(self, online: Optional[bool]) -> None:
         """True 在线（绿）/ False 离线（灰）/ None 连接中。"""

@@ -17,6 +17,7 @@ from textual.widgets import Button, Static, TextArea
 
 MIN_HEIGHT = 3
 MAX_HEIGHT = 8
+DEFAULT_PLACEHOLDER = "输入消息，Enter 发送，Ctrl+Enter 换行；/compact 压缩上下文"
 
 
 class ChatInput(TextArea):
@@ -35,7 +36,7 @@ class ChatInput(TextArea):
             super().__init__()
 
     def __init__(self, **kwargs):
-        kwargs.setdefault("placeholder", "输入消息，Enter 发送，Ctrl+Enter 换行")
+        kwargs.setdefault("placeholder", DEFAULT_PLACEHOLDER)
         kwargs.setdefault("id", "chat-input")
         kwargs.setdefault("soft_wrap", True)
         kwargs.setdefault("show_line_numbers", False)
@@ -86,6 +87,10 @@ class ChatInput(TextArea):
         self.load_text("")
         self._history_index = None
         self._draft = ""
+
+    def set_placeholder_hint(self, text: Optional[str] = None) -> None:
+        """切换占位提示（例如上下文达阈值时提醒执行 /compact）。"""
+        self.placeholder = text or DEFAULT_PLACEHOLDER
 
     def action_history_previous(self) -> None:
         if not self._history:

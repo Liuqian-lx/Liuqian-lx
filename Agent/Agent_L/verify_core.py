@@ -5,7 +5,9 @@
 
 它用假的 LLM 客户端驱动完整的工具调用闭环，用来证明：
 1. core 层可以在完全没有 tui 的情况下独立运行；
-2. 17 个工具、流式回调、工具闭环、历史加载/保存均正常；
+2. 19 个本地工具（含 createMCP 与 recallContext）、流式回调、工具闭环、
+   历史加载/保存均正常；
+   （.mcp.json 中的 MCP 工具会在本地工具之外动态合并，数量不固定）
 3. searchWeb 的配置缺失/空 query/网络与 HTTP 异常/结果归一化均可离线验证；
 4. fetchWebPage 的空/非法 URL、curl 缺失/超时、HTTP 错误、解析异常、空正文、
    截断与 trafilatura 正文提取均可离线验证；
@@ -14,7 +16,9 @@
 6. Skill 扫描/元数据提取/惰性加载、system prompt 注入、loadSkill 的
    SKILL.md 与附件读取、路径穿越拦截、多匹配候选与各类错误均可离线验证；
 7. createSkill 的名称校验、防覆盖、路径沙箱、Frontmatter 规范化与
-   SkillManager 即时刷新均可离线验证。
+   SkillManager 即时刷新均可离线验证；
+8. 上下文 Token 估算、60% 阈值、API usage 优先、JSONL 归档、压缩替换、
+   压缩失败保留原上下文，以及 recallContext 的全文检索均可离线验证。
 """
 
 from __future__ import annotations
@@ -29,9 +33,21 @@ import sys
 import tempfile
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
-from core.config import load_config
-from core.llm_client import LLMResponse, ToolCall
+# 本脚本面向离线验证：显式关闭 MCP 连接，避免导入 core 时访问网络。
+os.environ.setdefault("AGENT_L_DISABLE_MCP", "1")
+
+from core.config import LLMConfig, load_config
+from core.context_manager import (
+    COMPACTION_SYSTEM_PROMPT,
+    DEFAULT_CONTEXT_WINDOW,
+    ContextArchiveStore,
+    ContextManager,
+    estimate_tokens,
+    set_active_context_store,
+)
+from core.llm_client import LLMClient, LLMError, LLMResponse, ToolCall
 from core.session import ChatSession
 from core.skills import (
     SkillManager,
@@ -39,7 +55,15 @@ from core.skills import (
     parse_frontmatter,
     set_active_manager,
 )
-from core.tools import TOOL_MAP, TOOLS, execute_tool, run_cli, web_fetch, web_search
+from core.tools import (
+    LOCAL_TOOLS,
+    TOOL_MAP,
+    TOOLS,
+    execute_tool,
+    run_cli,
+    web_fetch,
+    web_search,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -108,6 +132,37 @@ class CaptureStubLLM:
         return LLMResponse(content="收到。")
 
 
+class CompactStubLLM:
+    """第一次调用正常回复，之后返回压缩摘要；fail=True 时抛出 LLMError。"""
+
+    def __init__(self, summary: str = "", fail: bool = False):
+        self.summary = summary or "# 工作摘要\n\n- 用户目标：保留 ALPHA-KEYWORD"
+        self.fail = fail
+        self.calls = []
+
+    def stream_chat(self, messages, tools=None, on_text=None, on_tool_call=None):
+        self.calls.append({"messages": list(messages), "tools": tools})
+        if len(self.calls) == 1:
+            if on_text is not None:
+                on_text("已记录。")
+            return LLMResponse(content="已记录。")
+        if self.fail:
+            raise LLMError("模拟摘要生成失败")
+        if on_text is not None:
+            on_text(self.summary)
+        return LLMResponse(content=self.summary)
+
+
+class UsageStubLLM:
+    """返回固定 API usage 的假模型，用于验证阈值判断。"""
+
+    def __init__(self, usage):
+        self.usage = usage
+
+    def stream_chat(self, messages, tools=None, on_text=None, on_tool_call=None):
+        return LLMResponse(content="收到。", usage=self.usage)
+
+
 def main() -> int:
     passed = 0
 
@@ -125,12 +180,25 @@ def main() -> int:
     print(f"       model    = {config.model_name}")
 
     names = [tool["function"]["name"] for tool in TOOLS]
-    ok("工具总数为 17 且无重名", len(names) == 17 and len(set(names)) == 17)
+    local_names = [tool["function"]["name"] for tool in LOCAL_TOOLS]
+    ok("本地工具总数为 19 且无重名", len(local_names) == 19 and len(set(local_names)) == 19)
+    ok(
+        "MCP 工具已动态合并且全量工具名唯一",
+        len(names) >= len(local_names) and len(names) == len(set(names)),
+    )
     ok("searchWeb 已注册到 schema 与 TOOL_MAP", "searchWeb" in names and "searchWeb" in TOOL_MAP)
     ok("loadSkill 已注册到 schema 与 TOOL_MAP", "loadSkill" in names and "loadSkill" in TOOL_MAP)
     ok(
         "createSkill 已注册到 schema 与 TOOL_MAP",
         "createSkill" in names and "createSkill" in TOOL_MAP,
+    )
+    ok(
+        "createMCP 已注册到 schema 与 TOOL_MAP",
+        "createMCP" in names and "createMCP" in TOOL_MAP,
+    )
+    ok(
+        "recallContext 已注册到 schema 与 TOOL_MAP",
+        "recallContext" in names and "recallContext" in TOOL_MAP,
     )
 
     date_result = execute_tool("getDate", "")
@@ -1082,6 +1150,451 @@ def main() -> int:
         finally:
             os.chdir(previous_cwd)
             set_active_manager(previous_active)
+
+        # ------------------------------------------------------ createMCP 离线自测
+        mcp_schema = next(
+            tool["function"] for tool in TOOLS if tool["function"]["name"] == "createMCP"
+        )
+        mcp_params = mcp_schema["parameters"]
+        ok(
+            "createMCP schema：name/type/url 必填且 type 枚举正确",
+            mcp_params["required"] == ["name", "type", "url"]
+            and mcp_params["properties"]["name"]["type"] == "string"
+            and mcp_params["properties"]["type"]["enum"] == ["streamable_http", "stdio"],
+        )
+
+        mcp_dir = workdir / "mcp-config"
+        mcp_dir.mkdir(parents=True, exist_ok=True)
+        previous_cwd = os.getcwd()
+        os.chdir(mcp_dir)
+        try:
+            created = execute_tool(
+                "createMCP",
+                json.dumps(
+                    {
+                        "name": "TestMCP",
+                        "type": "streamable_http",
+                        "url": "http://127.0.0.1:8091/mcp",
+                    }
+                ),
+            )
+            saved = json.loads((mcp_dir / ".mcp.json").read_text(encoding="utf-8"))
+            ok(
+                "createMCP 新增配置写入标准 mcpServers 结构",
+                created.get("success") is True
+                and created["result"]["action"] == "created"
+                and saved["mcpServers"]["TestMCP"]["type"] == "streamable_http"
+                and saved["mcpServers"]["TestMCP"]["url"] == "http://127.0.0.1:8091/mcp",
+            )
+
+            updated = execute_tool(
+                "createMCP",
+                json.dumps(
+                    {
+                        "name": "TestMCP",
+                        "type": "streamable_http",
+                        "url": "http://127.0.0.1:9091/mcp",
+                    }
+                ),
+            )
+            saved = json.loads((mcp_dir / ".mcp.json").read_text(encoding="utf-8"))
+            ok(
+                "createMCP 同名服务器覆盖更新",
+                updated.get("success") is True
+                and updated["result"]["action"] == "updated"
+                and saved["mcpServers"]["TestMCP"]["url"] == "http://127.0.0.1:9091/mcp",
+            )
+
+            stdio_created = execute_tool(
+                "createMCP",
+                json.dumps(
+                    {
+                        "name": "StdioMCP",
+                        "type": "stdio",
+                        "url": "",
+                        "command": "python",
+                        "args": ["server.py"],
+                    }
+                ),
+            )
+            saved = json.loads((mcp_dir / ".mcp.json").read_text(encoding="utf-8"))
+            ok(
+                "createMCP 支持 stdio 配置",
+                stdio_created.get("success") is True
+                and saved["mcpServers"]["StdioMCP"]["command"] == "python"
+                and saved["mcpServers"]["StdioMCP"]["args"] == ["server.py"],
+            )
+
+            invalid_payloads = [
+                {"name": "../evil", "type": "streamable_http", "url": "http://x"},
+                {"name": "Bad", "type": "grpc", "url": "http://x"},
+                {"name": "Bad", "type": "streamable_http", "url": "ftp://x"},
+                {"name": "Bad", "type": "stdio", "url": ""},
+            ]
+            invalid_results = [
+                execute_tool("createMCP", json.dumps(payload))
+                for payload in invalid_payloads
+            ]
+            ok(
+                "createMCP 非法名称/类型/地址/缺失 command 返回结构化错误",
+                all(
+                    item.get("success") is False and item.get("error")
+                    for item in invalid_results
+                ),
+            )
+
+            (mcp_dir / ".mcp.json").write_text("{broken", encoding="utf-8")
+            reject = execute_tool(
+                "createMCP",
+                json.dumps(
+                    {
+                        "name": "TestMCP",
+                        "type": "streamable_http",
+                        "url": "http://127.0.0.1:8091/mcp",
+                    }
+                ),
+            )
+            ok(
+                "createMCP 现有配置损坏时拒绝覆盖",
+                reject.get("success") is False
+                and (mcp_dir / ".mcp.json").read_text(encoding="utf-8") == "{broken",
+            )
+
+            mcp_source = (BASE_DIR / "core" / "tools" / "create_mcp.py").read_text(
+                encoding="utf-8"
+            )
+            ok(
+                "createMCP 使用临时文件 + 原子替换写入",
+                "os.replace(" in mcp_source and "tempfile.mkstemp(" in mcp_source,
+            )
+        finally:
+            os.chdir(previous_cwd)
+
+        # ------------------------------------------------------ 上下文压缩与检索
+        usage_chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="hi", tool_calls=None)
+                    )
+                ],
+                usage=None,
+            ),
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=5, total_tokens=15
+                ),
+            ),
+        ]
+        usage_calls = []
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                usage_calls.append(kwargs)
+                if "stream_options" in kwargs and getattr(
+                    self, "reject_stream_options", False
+                ):
+                    raise TypeError("stream_options is not supported")
+                return iter(usage_chunks)
+
+        fake_completions = FakeCompletions()
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=fake_completions)
+        )
+        fake_llm = LLMClient(
+            LLMConfig(base_url="http://example.com", model_name="m", api_key="k"),
+            client=fake_client,
+        )
+        usage_response = fake_llm.stream_chat([{"role": "user", "content": "hi"}])
+        ok(
+            "LLM 客户端请求 include_usage 并采集流末尾 usage",
+            usage_calls[0]["stream_options"] == {"include_usage": True}
+            and usage_response.content == "hi"
+            and usage_response.usage
+            == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+        fake_completions.reject_stream_options = True
+        usage_calls.clear()
+        retry_response = fake_llm.stream_chat([{"role": "user", "content": "hi"}])
+        ok(
+            "兼容接口不支持 stream_options 时自动去掉后重试",
+            len(usage_calls) == 2
+            and "stream_options" in usage_calls[0]
+            and "stream_options" not in usage_calls[1]
+            and retry_response.content == "hi"
+            and retry_response.usage is not None,
+        )
+
+        ok(
+            "Token 估算：中文按字、英文按约 4 字符",
+            estimate_tokens("你好") == 2
+            and estimate_tokens("abcdefgh") == 2
+            and estimate_tokens("") == 0,
+        )
+
+        default_ctx = ContextManager(workdir)
+        default_usage = default_ctx.usage(
+            [{"role": "user", "content": "你好"}], "系统提示"
+        )
+        ok(
+            "上下文窗口缺省为 128k 并标记「默认」",
+            default_usage.window == DEFAULT_CONTEXT_WINDOW
+            and default_usage.window_is_default
+            and default_usage.tokens > 0
+            and "默认" in default_usage.format_display()
+            and "128k" in default_usage.format_display(),
+        )
+
+        custom_ctx = ContextManager(workdir, context_window=64_000)
+        custom_usage = custom_ctx.usage([], "")
+        ok(
+            "显式配置 context_window 生效且不再标记默认",
+            custom_usage.window == 64_000
+            and not custom_usage.window_is_default
+            and "默认" not in custom_usage.format_display(),
+        )
+
+        default_ctx.record_api_usage({"total_tokens": 777})
+        api_usage = default_ctx.usage([{"role": "user", "content": "x"}], "")
+        ok(
+            "优先采用模型 API 返回的 Token 统计",
+            api_usage.tokens == 777 and api_usage.source == "api",
+        )
+        default_ctx.reset_usage()
+        ok(
+            "无 API usage 时回退本地估算",
+            default_ctx.usage([{"role": "user", "content": "x"}], "").source
+            == "estimate",
+        )
+
+        window_cfg = workdir / "config_window.ini"
+        window_cfg.write_text(
+            "[llm]\nbase_url = http://example.com\nmodel_name = demo\n"
+            "api_key = key\ncontext_window = 64000\n",
+            encoding="utf-8",
+        )
+        bad_window_cfg = workdir / "config_bad_window.ini"
+        bad_window_cfg.write_text(
+            "[llm]\nbase_url = http://example.com\nmodel_name = demo\n"
+            "api_key = key\ncontext_window = abc\n",
+            encoding="utf-8",
+        )
+        ok(
+            "config.ini 可选 context_window 解析与非法值兜底",
+            load_config(window_cfg).context_window == 64_000
+            and load_config(bad_window_cfg).context_window is None,
+        )
+
+        # 归档写入：逐行 JSONL，保留角色、工具参数、工具结果与顺序
+        store = ContextArchiveStore(workdir)
+        archived_messages = [
+            {
+                "role": "user",
+                "content": "请记住项目代号 ALPHA-KEYWORD，并继续处理 alpha.txt。",
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_alpha",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file_content",
+                            "arguments": '{"file_path": "alpha.txt"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_alpha",
+                "content": '{"success": true, "result": "ALPHA-KEYWORD"}',
+            },
+        ]
+        archive_info = store.save(archived_messages)
+        archive_path = Path(archive_info.path)
+        archive_lines = archive_path.read_text(encoding="utf-8").splitlines()
+        restored_archive = [json.loads(line) for line in archive_lines]
+        ok(
+            "原始上下文逐行保存为 JSONL 并保留顺序/角色/工具字段",
+            archive_path.is_file()
+            and archive_info.message_count == 3
+            and len(archive_lines) == 3
+            and [item["role"] for item in restored_archive]
+            == ["user", "assistant", "tool"]
+            and restored_archive[1]["tool_calls"][0]["function"]["arguments"]
+            == '{"file_path": "alpha.txt"}'
+            and restored_archive[2]["tool_call_id"] == "call_alpha"
+            and "ALPHA-KEYWORD" in restored_archive[2]["content"],
+        )
+
+        recall_all = store.search("ALPHA-KEYWORD")
+        recall_result = recall_all.get("result") or {}
+        ok(
+            "归档全文检索返回编号/行号/角色/片段",
+            recall_all.get("success") is True
+            and recall_result.get("total_matches") == 2
+            and recall_result.get("archive_id") == "all"
+            and {
+                item["archive_id"] for item in recall_result.get("matches", [])
+            }
+            == {archive_info.id}
+            and {item["line"] for item in recall_result.get("matches", [])}
+            == {1, 3}
+            and all("ALPHA-KEYWORD" in item["snippet"] for item in recall_result["matches"]),
+        )
+
+        recall_by_id = store.search("read_file_content", archive_info.id)
+        by_id_result = recall_by_id.get("result") or {}
+        ok(
+            "指定归档编号检索且能命中工具调用参数",
+            recall_by_id.get("success") is True
+            and by_id_result.get("archive_id") == archive_info.id
+            and by_id_result.get("matches")
+            and by_id_result["matches"][0]["role"] == "assistant"
+            and "read_file_content" in by_id_result["matches"][0]["snippet"],
+        )
+
+        ok(
+            "归档检索：空关键词/非法编号/不存在编号返回结构化错误",
+            store.search("   ").get("success") is False
+            and store.search("x", "../escape").get("success") is False
+            and store.search("x", "20990101-000000").get("success") is False,
+        )
+
+        set_active_context_store(store)
+        recall_schema = next(
+            tool["function"]
+            for tool in TOOLS
+            if tool["function"]["name"] == "recallContext"
+        )
+        ok(
+            "recallContext schema：text 必填、id 可选",
+            recall_schema["parameters"]["required"] == ["text"]
+            and recall_schema["parameters"]["properties"]["text"]["type"] == "string"
+            and recall_schema["parameters"]["properties"]["id"]["type"] == "string",
+        )
+        tool_recall = execute_tool(
+            "recallContext", json.dumps({"text": "ALPHA-KEYWORD"})
+        )
+        tool_recall_by_id = execute_tool(
+            "recallContext",
+            json.dumps({"id": archive_info.id, "text": "alpha.txt"}),
+        )
+        tool_recall_empty = execute_tool(
+            "recallContext", json.dumps({"text": "   "})
+        )
+        ok(
+            "recallContext 工具可按全部/指定归档检索并拒绝空关键词",
+            tool_recall.get("success") is True
+            and tool_recall["result"]["total_matches"] == 2
+            and tool_recall_by_id.get("success") is True
+            and tool_recall_by_id["result"]["archive_id"] == archive_info.id
+            and tool_recall_empty.get("success") is False
+            and tool_recall_empty.get("error") == "检索内容不能为空",
+        )
+
+        # 压缩成功：先归档 -> 再生成摘要 -> 最后替换历史
+        long_text = "请记住项目代号 ALPHA-KEYWORD，后续任务都要使用它。" * 60
+        compact_stub = CompactStubLLM()
+        compact_session = ChatSession(
+            compact_stub,
+            history_file=workdir / "compact_history.json",
+            project_root=workdir,
+        )
+        first_send = compact_session.send_message(long_text)
+        compact_result = compact_session.compact()
+        compact_history = compact_session.get_history()
+        compact_archive_path = (
+            Path(compact_result.archive_path) if compact_result.archive_path else None
+        )
+        ok(
+            "压缩成功时返回归档编号与可读的归档文件",
+            first_send.error is None
+            and compact_result.success is True
+            and bool(compact_result.archive_id)
+            and compact_archive_path is not None
+            and compact_archive_path.is_file()
+            and len(
+                compact_archive_path.read_text(encoding="utf-8").splitlines()
+            )
+            == 2,
+        )
+        ok(
+            "压缩只调用 LLM 生成摘要且不传入任何工具",
+            len(compact_stub.calls) == 2
+            and compact_stub.calls[1]["tools"] is None
+            and "上下文管理助手"
+            in compact_stub.calls[1]["messages"][0]["content"],
+        )
+        ok(
+            "压缩后用摘要替换历史并追加归档说明",
+            len(compact_history) == 1
+            and compact_history[0]["role"] == "user"
+            and "【历史上下文摘要】" in compact_history[0]["content"]
+            and compact_result.summary in compact_history[0]["content"]
+            and compact_result.archive_id in compact_history[0]["content"]
+            and "recallContext" in compact_history[0]["content"],
+        )
+        ok(
+            "压缩后上下文显著缩短且回退本地估算",
+            compact_result.tokens_after < compact_result.tokens_before
+            and compact_session.get_context_usage().source == "estimate"
+            and compact_session.get_context_usage().needs_compact is False,
+        )
+        compact_saved = json.loads(
+            (workdir / "compact_history.json").read_text(encoding="utf-8")
+        )
+        ok(
+            "压缩结果已持久化到历史文件",
+            len(compact_saved) == 1
+            and compact_result.archive_id in compact_saved[0]["content"],
+        )
+
+        # 压缩失败：生成摘要报错时必须保留原上下文
+        fail_stub = CompactStubLLM(fail=True)
+        fail_session = ChatSession(
+            fail_stub,
+            history_file=workdir / "compact_fail_history.json",
+            project_root=workdir,
+        )
+        fail_session.send_message("这条消息必须原样保留")
+        before_fail = fail_session.get_history()
+        fail_result = fail_session.compact()
+        ok(
+            "生成摘要失败时保留原有上下文并报告错误",
+            fail_result.success is False
+            and "已保留原有上下文" in (fail_result.error or "")
+            and fail_session.get_history() == before_fail
+            and fail_session.is_compacting is False,
+        )
+
+        # 达到 60% 阈值后暂停接受普通提示词
+        usage_stub = UsageStubLLM({"total_tokens": 70_000})
+        block_session = ChatSession(
+            usage_stub,
+            history_file=workdir / "block_history.json",
+            project_root=workdir / "no-such-project",
+            context_window=100_000,
+        )
+        reported = []
+        first_block_send = block_session.send_message(
+            "你好", on_usage=reported.append
+        )
+        blocked_send = block_session.send_message("继续普通任务")
+        ok(
+            "每次模型响应后回调上下文使用量并在 60% 后拒绝新提示词",
+            first_block_send.error is None
+            and reported
+            and reported[-1].tokens == 70_000
+            and reported[-1].source == "api"
+            and block_session.needs_compact
+            and blocked_send.error is not None
+            and "/compact" in (blocked_send.error or ""),
+        )
 
         core_sources = list((BASE_DIR / "core").rglob("*.py"))
         leaks = [

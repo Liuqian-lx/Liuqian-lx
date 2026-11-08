@@ -23,6 +23,7 @@ def main() -> int:
     session = ChatSession(
         LLMClient(config),
         history_file=BASE_DIR / "chat_history.json",
+        context_window=config.context_window,
     )
     ChatApp(session, model_name=config.model_name).run()
     return 0

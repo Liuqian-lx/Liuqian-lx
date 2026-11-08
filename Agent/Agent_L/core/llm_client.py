@@ -60,6 +60,8 @@ class LLMResponse:
 
     content: str = ""
     tool_calls: List[ToolCall] = field(default_factory=list)
+    # 模型 API 返回的 Token 统计（部分兼容接口不提供，此时为 None）
+    usage: Optional[Dict[str, int]] = None
 
     def to_assistant_message(self) -> Dict[str, Any]:
         """转换为可写入 messages 的 assistant 消息。"""
@@ -105,6 +107,8 @@ class LLMClient:
             "model": self._config.model_name,
             "messages": messages,
             "stream": True,
+            # 要求兼容接口在流末尾返回 usage，用于上下文长度监控。
+            "stream_options": {"include_usage": True},
         }
         if tools:
             request["tools"] = tools
@@ -112,13 +116,32 @@ class LLMClient:
         try:
             stream = self._client.chat.completions.create(**request)
         except Exception as exc:
-            raise LLMError(f"API 调用失败：{exc}") from exc
+            # 部分 OpenAI 兼容接口不识别 stream_options，去掉后重试一次。
+            if request.pop("stream_options", None) is not None:
+                try:
+                    stream = self._client.chat.completions.create(**request)
+                except Exception as retry_exc:
+                    raise LLMError(f"API 调用失败：{retry_exc}") from retry_exc
+            else:
+                raise LLMError(f"API 调用失败：{exc}") from exc
 
         content_parts: List[str] = []
         tool_calls: Dict[int, Dict[str, str]] = {}
+        usage: Optional[Dict[str, int]] = None
 
         try:
             for chunk in stream:
+                # usage 通常在最后一个 choices 为空的 chunk 中返回
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    usage = {
+                        "prompt_tokens": int(getattr(chunk_usage, "prompt_tokens", 0) or 0),
+                        "completion_tokens": int(
+                            getattr(chunk_usage, "completion_tokens", 0) or 0
+                        ),
+                        "total_tokens": int(getattr(chunk_usage, "total_tokens", 0) or 0),
+                    }
+
                 choices = getattr(chunk, "choices", None)
                 if not choices:
                     continue
@@ -161,4 +184,8 @@ class LLMClient:
             if on_tool_call is not None:
                 on_tool_call(call)
 
-        return LLMResponse(content="".join(content_parts), tool_calls=assembled)
+        return LLMResponse(
+            content="".join(content_parts),
+            tool_calls=assembled,
+            usage=usage,
+        )

@@ -1,3 +1,4 @@
 openai>=1.40.0
 textual>=0.80.0
 trafilatura>=1.8.0
+mcp>=1.9.0

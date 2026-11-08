@@ -1,0 +1,118 @@
+
+[1m[36m╔══════════════════════════════════════════════════════════════════════════════╗[0m
+[1m[36m║                    [35m🐾  宠 物 医 院 · Pet Hospital REST API  🐾                     [36m║[0m
+[1m[36m║                     [2m宠物 / 主人 / 电话 / 疾病 / 医生 / 历史病历 / 总花费                      [36m║[0m
+[1m[36m╚══════════════════════════════════════════════════════════════════════════════╝[0m
+  [2m版本[0m 1.0.0   [2m数据库[0m [32mdata/pet.db[0m   [2m现有档案[0m [33m1008 条[0m
+
+[1m[97m▍网页操作界面[0m
+
+  [2m在浏览器中打开：[0m
+    [1m[35mhttp://127.0.0.1:8080/[0m
+
+  [2m提供：档案列表与搜索、新增/编辑/删除档案、查看历史病历与消费明细、经营统计[0m
+  [2m网页资源已内嵌到可执行文件中，无需额外的 html/css/js 文件[0m
+
+[1m[97m▍服务清单（共 29 个接口）[0m
+
+  [1m[34m── 系统与统计 ──[0m
+    [32mGET   [0m [97m/                                         [0m [2m网页操作界面（浏览器打开即可使用）[0m
+    [32mGET   [0m [97m/health                                   [0m [2m健康检查[0m
+    [32mGET   [0m [97m/api/v1/endpoints                         [0m [2m接口清单（机器可读）[0m
+    [32mGET   [0m [97m/api/v1/stats                             [0m [2m医院经营统计（收入/种类/医生排行）[0m
+    [32mGET   [0m [97m/api/v1/meta                              [0m [2m枚举字典（种类/状态/收费分类）[0m
+  [1m[34m── 宠物档案 CRUD ──[0m
+    [32mGET   [0m [97m/api/v1/pets                              [0m [2m查询宠物列表（过滤+排序+分页）[0m
+    [34mPOST  [0m [97m/api/v1/pets                              [0m [2m新增宠物档案[0m
+    [32mGET   [0m [97m/api/v1/pets/{id}                         [0m [2m按 ID 查询单个宠物[0m
+    [33mPUT   [0m [97m/api/v1/pets/{id}                         [0m [2m全量更新宠物档案[0m
+    [35mPATCH [0m [97m/api/v1/pets/{id}                         [0m [2m局部更新（只传要改的字段）[0m
+    [31mDELETE[0m [97m/api/v1/pets/{id}                         [0m [2m删除宠物档案[0m
+  [1m[34m── 高级查询 / 搜索 ──[0m
+    [32mGET   [0m [97m/api/v1/pets/search                       [0m [2m全文检索（跨字段，空格分词 AND）[0m
+    [32mGET   [0m [97m/api/v1/pets/by-owner                     [0m [2m按主人姓名/电话查宠物[0m
+    [32mGET   [0m [97m/api/v1/pets/by-doctor                    [0m [2m按医生查其接诊的宠物[0m
+    [32mGET   [0m [97m/api/v1/pets/by-species                   [0m [2m按种类查宠物[0m
+    [32mGET   [0m [97m/api/v1/pets/by-disease                   [0m [2m按疾病查宠物[0m
+    [32mGET   [0m [97m/api/v1/pets/by-status                    [0m [2m按就诊状态查宠物[0m
+    [32mGET   [0m [97m/api/v1/pets/top-spenders                 [0m [2m消费排行榜（在医院总花费）[0m
+    [32mGET   [0m [97m/api/v1/pets/cost-range                   [0m [2m按总花费区间查询[0m
+  [1m[34m── 历史病历 ──[0m
+    [32mGET   [0m [97m/api/v1/pets/{id}/records                 [0m [2m查询某宠物的历史病历[0m
+    [34mPOST  [0m [97m/api/v1/pets/{id}/records                 [0m [2m为宠物追加一条病历[0m
+  [1m[34m── 消费与汇总 ──[0m
+    [32mGET   [0m [97m/api/v1/pets/{id}/charges                 [0m [2m查询某宠物的消费明细[0m
+    [34mPOST  [0m [97m/api/v1/pets/{id}/charges                 [0m [2m为宠物追加一笔收费[0m
+    [32mGET   [0m [97m/api/v1/pets/{id}/summary                 [0m [2m单只宠物费用与就诊汇总[0m
+  [1m[34m── 批量 / 导出 / 管理 ──[0m
+    [34mPOST  [0m [97m/api/v1/pets/batch                        [0m [2m批量新增（一次多条）[0m
+    [34mPOST  [0m [97m/api/v1/pets/batch-delete                 [0m [2m批量删除[0m
+    [32mGET   [0m [97m/api/v1/export                            [0m [2m导出全部数据（json / csv）[0m
+    [34mPOST  [0m [97m/api/v1/admin/compact                     [0m [2m手动压实数据库文件（清理日志垃圾）[0m
+    [34mPOST  [0m [97m/api/v1/admin/seed                        [0m [2m写入模拟数据（可选 count=N 或 all）[0m
+
+[1m[97m▍访问案例（把 HOST 换成服务网址即可直接执行）[0m
+
+  [33m1. 打开网页操作界面（浏览器）[0m
+    [32m$ http://127.0.0.1:8080/[0m
+
+  [33m2. 健康检查[0m
+    [32m$ curl -s http://127.0.0.1:8080/health[0m
+
+  [33m3. 列出全部接口（JSON）[0m
+    [32m$ curl -s http://127.0.0.1:8080/api/v1/endpoints[0m
+
+  [33m4. 新增一只宠物[0m
+    [32m$ curl -s -X POST http://127.0.0.1:8080/api/v1/pets -H 'Content-Type: application/json' -d '{"name":"旺财","species":"犬","breed":"金毛","gender":"公","ageMonths":36,"ownerName":"张三","ownerPhone":"13800001111","disease":"急性肠胃炎","doctor":"李医生","status":"待就诊"}'[0m
+
+  [33m5. 查询宠物列表（分页+排序）[0m
+    [32m$ curl -s 'http://127.0.0.1:8080/api/v1/pets?page=1&pageSize=10&sortBy=totalCost&order=desc'[0m
+
+  [33m6. 按主人电话查宠物[0m
+    [32m$ curl -s 'http://127.0.0.1:8080/api/v1/pets/by-owner?phone=13800001111'[0m
+
+  [33m7. 全文检索病历（如：肠胃炎）[0m
+    [32m$ curl -s 'http://127.0.0.1:8080/api/v1/pets/search?q=肠胃炎'[0m
+
+  [33m8. 按医生查接诊宠物[0m
+    [32m$ curl -s 'http://127.0.0.1:8080/api/v1/pets/by-doctor?doctor=李医生'[0m
+
+  [33m9. 消费排行榜[0m
+    [32m$ curl -s 'http://127.0.0.1:8080/api/v1/pets/top-spenders?limit=5'[0m
+
+  [33m10. 追加一条历史病历[0m
+    [32m$ curl -s -X POST http://127.0.0.1:8080/api/v1/pets/PET-000001/records -H 'Content-Type: application/json' -d '{"doctor":"李医生","diagnosis":"急性肠胃炎","symptoms":"呕吐腹泻","treatment":"补液消炎","prescription":["阿莫西林"],"charge":380}'[0m
+
+  [33m11. 追加一笔收费（自动累计总花费）[0m
+    [32m$ curl -s -X POST http://127.0.0.1:8080/api/v1/pets/PET-000001/charges -H 'Content-Type: application/json' -d '{"item":"血常规检查","category":"检查","amount":180,"doctor":"李医生"}'[0m
+
+  [33m12. 单只宠物费用汇总[0m
+    [32m$ curl -s http://127.0.0.1:8080/api/v1/pets/PET-000001/summary[0m
+
+  [33m13. 医院经营统计[0m
+    [32m$ curl -s 'http://127.0.0.1:8080/api/v1/stats?top=5'[0m
+
+  [33m14. 局部更新（只改状态）[0m
+    [32m$ curl -s -X PATCH http://127.0.0.1:8080/api/v1/pets/PET-000001 -H 'Content-Type: application/json' -d '{"status":"已康复"}'[0m
+
+  [33m15. 删除宠物档案[0m
+    [32m$ curl -s -X DELETE http://127.0.0.1:8080/api/v1/pets/PET-000001[0m
+
+  [33m16. 导出全部数据为 CSV[0m
+    [32m$ curl -s 'http://127.0.0.1:8080/api/v1/export?format=csv' -o pets.csv[0m
+
+  [33m17. 写入 1000 条模拟数据[0m
+    [32m$ curl -s -X POST 'http://127.0.0.1:8080/api/v1/admin/seed?force=true&count=1000'[0m
+
+[1m[32m══════════════════════════════════════════════════════════════════════════════[0m
+[1m[32m  ✅ 服务已启动，请访问：[0m  [1m[35mhttp://127.0.0.1:8080/[0m
+[2m     接口清单（JSON）：[0m  http://127.0.0.1:8080/api/v1/endpoints
+[2m     数据库文件：[0m  [32mdata/pet.db[0m
+[1m[32m══════════════════════════════════════════════════════════════════════════════[0m
+
+[1m[97m▍实时访问日志（Ctrl+C 退出）[0m
+
+
+[33m├─ 收到退出信号，正在关闭服务...[0m
+[32m├─ 数据库已压实并安全落盘: data/pet.db[0m
+[36m└─ 再见 👋[0m

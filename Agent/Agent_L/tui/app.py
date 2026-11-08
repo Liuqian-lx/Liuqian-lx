@@ -15,11 +15,13 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Button
 
+from core.context_manager import ContextUsage
 from core.llm_client import ToolCall
-from core.session import ChatSession, SendResult, ToolEvent
+from core.session import ChatSession, CompactResult, SendResult, ToolEvent
 
 from .components import (
     ChatInput,
+    CompactPanel,
     HeaderBar,
     InputArea,
     MessageView,
@@ -59,6 +61,18 @@ class ChatApp(App):
         width: 1fr;
         height: 1;
         color: #bccbd9;
+        text-style: bold;
+    }
+
+    .header-context {
+        width: auto;
+        height: 1;
+        padding: 0 2;
+        color: #8fa3b5;
+    }
+
+    .header-context.warn {
+        color: #d9a066;
         text-style: bold;
     }
 
@@ -321,6 +335,7 @@ class ChatApp(App):
         self._busy = False
         self._quitting = False
         self._active_bubble = None
+        self._compact_warned = False
 
         self._view: Optional[MessageView] = None
         self._input: Optional[ChatInput] = None
@@ -347,6 +362,7 @@ class ChatApp(App):
             self._view.add_notice(self._session.last_error)
 
         self._refresh_message_count()
+        self._refresh_context_usage(warn=True)
         self._status.set_state("就绪")
         self._header.set_online(None)
         self._input.focus()
@@ -411,8 +427,9 @@ class ChatApp(App):
     @on(ChatInput.Submitted)
     def _handle_submit(self, event: ChatInput.Submitted) -> None:
         if self._busy:
+            self.notify("当前任务尚未结束，请稍候", severity="warning", timeout=2)
             return
-        self._start_turn(event.value)
+        self._submit_text(event.value)
 
     @on(Button.Pressed, "#send-button")
     def _handle_send_button(self, event: Button.Pressed) -> None:
@@ -420,9 +437,36 @@ class ChatApp(App):
             return
         text = self._input.text.strip()
         if text:
-            self._start_turn(text)
+            self._submit_text(text)
         else:
             self._input.focus()
+
+    def _submit_text(self, text: str) -> None:
+        """统一入口：优先识别 /compact，再处理普通提示词。"""
+        text = (text or "").strip()
+        if not text:
+            return
+
+        if text == "/compact":
+            self._start_compact()
+            return
+
+        if self._session.needs_compact:
+            usage = self._session.get_context_usage()
+            message = (
+                f"上下文已使用 {usage.percent:.1f}%，"
+                "请先输入 /compact 压缩上下文后再继续。"
+            )
+            if self._view is not None:
+                self._view.add_notice(f"⚠ {message}")
+                self._refresh_message_count()
+            self._status.set_state("上下文已达阈值，请输入 /compact")
+            self.notify(message, severity="warning", timeout=3)
+            if self._input is not None:
+                self._input.focus()
+            return
+
+        self._start_turn(text)
 
     def _start_turn(self, text: str) -> None:
         if self._view is None or self._input is None:
@@ -465,6 +509,7 @@ class ChatApp(App):
                 on_text=self._thread_text,
                 on_tool_call=self._thread_tool_call,
                 on_tool_result=self._thread_tool_result,
+                on_usage=self._thread_usage,
             )
         except Exception as exc:  # core 已捕获大部分异常，这里仅兜底
             result = SendResult(content="", error=f"会话执行失败：{exc}")
@@ -481,12 +526,123 @@ class ChatApp(App):
     def _thread_tool_result(self, event: ToolEvent) -> None:
         self._call_ui(self._show_tool_result, event)
 
+    def _thread_usage(self, usage: ContextUsage) -> None:
+        self._call_ui(self._update_context_usage, usage)
+
     def _call_ui(self, callback: Callable[..., Any], *args: Any) -> None:
         try:
             self.call_from_thread(callback, *args)
         except RuntimeError:
             # 应用正在退出，忽略未送达的界面更新
             pass
+
+    # ------------------------------------------------------------------ 压缩
+    def _start_compact(self) -> None:
+        """进入专门的压缩状态：禁用输入，只允许 LLM 生成摘要。"""
+        if self._busy:
+            self.notify("当前任务尚未结束，请稍候", severity="warning", timeout=2)
+            return
+        if self._view is None or self._input is None:
+            return
+
+        self._busy = True
+        self._active_bubble = None
+        self._input.clear_input()
+        self._view.show_thinking("正在压缩上下文")
+        self._status.set_state("上下文压缩中…")
+        self._header.set_online(None)
+        self._set_busy_ui(True)
+        self._compact_worker()
+
+    @work(thread=True, exclusive=True, group="chat")
+    def _compact_worker(self) -> None:
+        try:
+            result = self._session.compact()
+        except Exception as exc:  # core 已捕获大部分异常，这里仅兜底
+            result = CompactResult(error=f"上下文压缩失败：{exc}")
+        self._call_ui(self._finish_compact, result)
+
+    def _finish_compact(self, result: CompactResult) -> None:
+        if self._view is not None:
+            self._view.hide_thinking()
+
+        self._busy = False
+        self._active_bubble = None
+
+        if not result.success:
+            message = result.error or "上下文压缩失败"
+            if self._view is not None:
+                self._view.add_error(message)
+                self._refresh_message_count()
+            self._status.set_state("压缩失败，可重新执行 /compact")
+            self.notify(message, severity="error", timeout=4)
+            self._set_busy_ui(False)
+            # 失败时上下文仍超阈值，需要继续提示用户重试
+            self._compact_warned = False
+            self._refresh_context_usage(warn=True)
+            return
+
+        meta = (
+            f"归档编号 {result.archive_id} · 归档 {result.message_count} 条消息 · "
+            f"压缩前约 {result.tokens_before} tokens · "
+            f"压缩后约 {result.tokens_after} tokens"
+        )
+        if self._view is not None:
+            self._view.add_notice(
+                f"✓ 上下文压缩完成，原始记录已保存为归档 {result.archive_id}"
+            )
+            self._refresh_message_count()
+
+        self._compact_warned = False
+        self._set_busy_ui(False)
+        self._refresh_context_usage()
+        self._status.set_state("上下文压缩完成，可继续输入")
+        self._header.set_online(True)
+        self.push_screen(
+            CompactPanel(result.before_text, result.summary, meta=meta)
+        )
+
+    def _update_context_usage(self, usage: ContextUsage) -> None:
+        """刷新顶栏的 k/k 与百分比；每次模型响应后都会调用。"""
+        if self._header is not None:
+            self._header.set_context(
+                usage.format_display(),
+                warn=usage.needs_compact,
+            )
+
+        if usage.needs_compact:
+            if self._input is not None:
+                self._input.set_placeholder_hint(
+                    "上下文已达阈值，请输入 /compact 压缩后再继续"
+                )
+            # 回复进行中只切换顶栏警示色，警告气泡留到本轮结束再显示
+            if not self._busy:
+                self._show_compact_warning(usage)
+            return
+
+        self._compact_warned = False
+        if self._input is not None and not self._busy:
+            self._input.set_placeholder_hint()
+
+    def _show_compact_warning(self, usage: ContextUsage) -> None:
+        if self._compact_warned:
+            return
+        self._compact_warned = True
+        if self._view is not None:
+            self._view.add_notice(
+                f"⚠ 上下文已使用 {usage.percent:.1f}%"
+                f"（阈值 {usage.threshold * 100:.0f}%），"
+                "请执行 /compact 压缩上下文后再继续输入。"
+            )
+            self._refresh_message_count()
+        self._status.set_state("上下文接近上限，请输入 /compact")
+
+    def _refresh_context_usage(self, warn: bool = False) -> None:
+        """刷新上下文使用量，达到阈值时按要求提示 /compact。"""
+        usage = self._session.get_context_usage()
+        self._update_context_usage(usage)
+        if warn and usage.needs_compact:
+            self._show_compact_warning(usage)
 
     # ------------------------------------------------------------------ 界面更新
     def _append_text(self, delta: str) -> None:
@@ -536,6 +692,7 @@ class ChatApp(App):
         self._active_bubble = None
         self._busy = False
         self._set_busy_ui(False)
+        self._refresh_context_usage(warn=True)
 
     def _refresh_message_count(self) -> None:
         if self._view is not None and self._status is not None:
