@@ -3,6 +3,25 @@
 一个基于 Function Calling 的终端聊天助手：流式对话、工具调用闭环、对话历史持久化。
 业务逻辑全部位于 `core/`，`tui/` 只负责渲染与事件转发。
 
+## 项目组成（四项验收组件）
+
+整套作业位于 `D:\Liuqian-lx`，四个组件在根目录下并列存放：
+
+```
+D:\Liuqian-lx\
+├── PetHospitalMCP\          # ① 宠物医院 MCP
+│   ├── windows\             #    Go 版 REST 服务 + 内嵌网页控制台（127.0.0.1:8080）
+│   └── mcp-server\          #    Python 版 MCP 服务（127.0.0.1:8090/mcp）
+├── AnythingLLMMCP\          # ② AnythingLLM 知识库 MCP 服务（127.0.0.1:8091/mcp）
+├── AnythingLLMWebpage\      # ③ 知识库前端网页（serve.bat，127.0.0.1:8092）
+├── Agent\Agent_L\           # ④ xAgent 主程序（本目录）
+└── office\                  # 运行目录：.mcp.json / config.ini / .agents
+```
+
+> `.mcp.json` 中的 `Bazi-MCP` 是外部第三方在线服务
+> （`mcp.api-inference.modelscope.net`），**不属于本地项目组件**；离线或不需要时
+> 删除该条目即可，不影响其余两个本地 MCP 服务。
+
 ## 目录结构
 
 ```
@@ -240,18 +259,25 @@ Function Calling Schema 后合并进 `TOOLS` / `TOOL_MAP`。所有 MCP 代码位
 - 支持 `headers`（HTTP 鉴权头）等标准字段；URL 首尾空白会被自动去除。
 - 文件不存在时静默跳过；JSON 损坏或单条配置不完整时只跳过对应条目，
   不影响程序启动。
-- 配套的本地宠物医院 MCP 服务（`anytingLLMMCP` 目录，提供 `list_pets` /
-  `create_pet`）需先启动：运行其 `start.bat` 或 `python main.py`，默认监听
+- 配套的本地宠物医院 MCP 服务（`PetHospitalMCP\mcp-server`，提供 `list_pets` /
+  `create_pet`）需先启动：在该目录运行 `start.bat` 或 `python main.py`，默认监听
   `0.0.0.0:8090`，端点为 `/mcp`。也可改用 stdio 配置由 Agent 直接拉起
-  （`python main.py --stdio`），无需常驻进程。
-- AnythingLLM 知识库 MCP 服务（`111/anythingllm-mcp`，提供 `workspace_chat` /
+  （`python main.py --stdio`），无需常驻进程。注意它按当前工作目录查找
+  `./data/pet.db`，请在 `mcp-server` 目录内启动。
+- AnythingLLM 知识库 MCP 服务（`AnythingLLMMCP`，提供 `workspace_chat` /
   `workspace_file_count` / `workspace_search`）监听 `0.0.0.0:8091`，端点为
-  `/mcp`；其 `workspace_search` 是纯向量检索，不依赖聊天模型。
+  `/mcp`；启动前请确保 AnythingLLM 本体（默认 `127.0.0.1:3001`）已运行，
+  并在 `AnythingLLMMCP\.env` 中填好 API Key。其 `workspace_search` 是纯向量
+  检索，不依赖聊天模型。
+- 知识库前端网页（`AnythingLLMWebpage`）通过 `serve.bat` 在
+  `http://127.0.0.1:8092/index.html` 启动，用于上传文档、管理并向量化工作区；
+  页面中的 API 地址与 Key 由用户输入并保存在浏览器 `localStorage`，仓库内
+  不含任何明文密钥。
 - `D:\Liuqian-lx\PetHospitalMCP\windows\pethospital.exe` 是 Go 编写的 REST 服务
   （默认 `127.0.0.1:8080`，网页界面 `/`、接口清单 `/api/v1/endpoints`），
   **不实现 MCP 协议**，不要写入 `mcpServers`。
-- Python 版（`anytingLLMMCP`）与 exe 版使用**两份独立的 `data/pet.db` 副本**，
-  数据不会自动同步；MCP 能力统一由 Python 版提供。
+- Python 版（`PetHospitalMCP\mcp-server`）与 exe 版使用**两份独立的
+  `data/pet.db` 副本**，数据不会自动同步；MCP 能力统一由 Python 版提供。
 - 除手工编辑外，也可在会话中调用 `createMCP` 工具动态新增/更新服务器配置，
   写入后自动热重载（见「createMCP 工具」）。
 

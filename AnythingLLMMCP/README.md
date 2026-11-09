@@ -21,6 +21,10 @@ MCP 工具。监听地址与端口由 `.env` 决定，当前配置为
 
 ## 网页录入工具（upload.html）
 
+> 独立的前端项目位于根目录 `AnythingLLMWebpage`（由 `serve.bat` 在
+> `http://127.0.0.1:8092/index.html` 提供服务），其 `index.html` 即本目录
+> `upload.html` 的副本；本目录保留一份便于随 MCP 服务一起分发。
+
 浏览器打开 `upload.html` 即可把本地文档上传到 AnythingLLM 工作区并自动向量化
 （`POST /api/v1/document/upload` + 轮询等待嵌入完成），之后即可用
 `workspace_search` / `workspace_chat` 检索这些文档。

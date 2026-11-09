@@ -6,7 +6,7 @@
     },
     "PetHospitalMCP": {
       "type": "streamable_http",
-      "url": "http://127.0.0.1:18090/mcp"
+      "url": "http://127.0.0.1:8090/mcp"
     },
     "AnythingLLMMCP": {
       "type": "streamable_http",

@@ -1,12 +1,13 @@
-# 宠物医院 MCP 服务（目录名 `anytingLLMMCP`）
+# 宠物医院 MCP 服务（`PetHospitalMCP/mcp-server`）
 
 基于 `mcp` SDK 2.x（协议 2026-07-28）实现的宠物医院 MCP 服务，向
 xAgent / Agent_L 等标准 MCP 客户端提供 `list_pets` / `create_pet` 工具。
 数据直接读取本目录的 `data/pet.db`（PETDBv1 追加日志格式，当前 1011 条档案）。
 
-> 目录名沿用 `anytingLLMMCP`，但服务本身是**宠物医院 MCP 服务**
-> （服务器名 `pet-hospital`），与 AnythingLLM 无关。
-> AnythingLLM 知识库 MCP 服务在 `111/anythingllm-mcp`，监听 8091。
+> 本目录是宠物医院的 **Python 版 MCP 服务**（服务器名 `pet-hospital`），
+> 与同一项目下的 `PetHospitalMCP/windows`（Go 版 REST 服务 + 网页控制台）
+> 并列存放。
+> AnythingLLM 知识库 MCP 服务在根目录的 `AnythingLLMMCP`，监听 8091。
 
 ## 依赖
 
@@ -83,8 +84,8 @@ stdio 方式：
     "PetHospitalMCP": {
       "type": "stdio",
       "command": "C:/Users/lq/AppData/Local/Programs/Python/Python313/python.exe",
-      "args": ["D:/Liuqian-lx/anytingLLMMCP/main.py", "--stdio"],
-      "cwd": "D:/Liuqian-lx/anytingLLMMCP"
+      "args": ["D:/Liuqian-lx/PetHospitalMCP/mcp-server/main.py", "--stdio"],
+      "cwd": "D:/Liuqian-lx/PetHospitalMCP/mcp-server"
     }
   }
 }
@@ -92,7 +93,9 @@ stdio 方式：
 
 ## 说明
 
-- 本服务直接读写 `anytingLLMMCP/data/pet.db`，与
+- 本服务按**当前工作目录**查找 `./data/pet.db`，因此请在本目录内执行
+  `python main.py` 或双击 `start.bat`（脚本会自动 `cd /d "%~dp0"`）。
+- 本服务直接读写 `PetHospitalMCP/mcp-server/data/pet.db`，与
   `PetHospitalMCP/windows/data/pet.db` 是两份独立副本，数据不会自动同步。
 - `PetHospitalMCP/windows/pethospital.exe` 是 Go 编写的 REST 服务 + 网页控制台
   （默认 `127.0.0.1:8080`），只提供 `/api/v1/...` 接口，**不实现 MCP 协议**，
