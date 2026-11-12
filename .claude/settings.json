@@ -92,7 +92,21 @@
       "Bash(AGENT_L_DISABLE_MCP=1 PYTHONIOENCODING=utf-8 timeout 12 python \"d:/Liuqian-lx/Agent/Agent_L/main.py\")",
       "Bash(AGENT_L_DISABLE_MCP=1 PYTHONIOENCODING=utf-8 python -u -)",
       "Bash(AGENT_L_DISABLE_MCP=1 PYTHONIOENCODING=utf-8 timeout 12 python -u -)",
-      "Bash(PYTHONIOENCODING=utf-8 timeout 8 python -u -)"
+      "Bash(PYTHONIOENCODING=utf-8 timeout 8 python -u -)",
+      "Bash(python -m py_compile core/context_manager.py core/session.py core/llm_client.py core/config.py core/tools/recall_context.py core/tools/__init__.py tui/app.py tui/components/header_bar.py tui/components/compact_panel.py tui/components/input_bar.py tui/components/status_bar.py main.py)",
+      "Bash(AGENT_L_DISABLE_MCP=1 python verify_core.py)",
+      "Bash(cd \"/d/Liuqian-lx/111/anythingllm-mcp\" && grep -n \"open\\(\\\\|Path\\(\\\\|os.getcwd\\\\|dirname\\\\|__file__\\\\|\\\\.env\\\\|static\\\\|upload\" server.py anythingllm.py smoke_test.py | head -40; echo \"=== .env ===\"; sed 's/\\\\\\(KEY=\\\\\\).*/\\\\1***/' .env)",
+      "Bash(sed 's/\\\\\\(api_key *= *\\\\\\).*/\\\\1***/' office/config.ini)",
+      "Bash(sed 's/\\\\\\(api_key *= *\\\\\\).*/\\\\1***/' Agent/Agent_L/config.ini)",
+      "Bash(grep -n \"监听\\\\|端点\\\\|http://\\\\|port\\\\|Port\\\\|Uvicorn\\\\|running on\" anytingLLMMCP/server.err.log 111/anythingllm-mcp/server.err.log)",
+      "Bash(grep -Ei \"__pycache__|\\\\.pyc$|\\\\.log$|\\\\.venv/|\\(^|/\\)\\\\.env$\")",
+      "Bash(git grep *)",
+      "Bash(grep -Ec '\\(^|/\\)__pycache__/|\\\\.pyc$|\\\\.log$|\\(^|/\\)\\\\.venv/')",
+      "Bash(git check-ignore *)",
+      "Bash(grep -v \"\\\\.pyc$\")"
+    ],
+    "additionalDirectories": [
+      "D:\\Liuqian-lx\\111\\anythingllm-mcp"
     ]
   }
 }
